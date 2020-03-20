@@ -12,7 +12,7 @@ use heim::units::{
     Information,
 };
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 
 #[async_std::main]
@@ -21,7 +21,6 @@ async fn main() -> heim::Result<()> {
     //        log+env_logger+kv? Or slog? Or another logger? Hierarchical and
     //        structured logging capabilities would be useful.
     println!("Probing host system characteristics...");
-
     let cpu_frequency = heim::cpu::frequency();
     let disk_partitions = heim::disk::partitions();
     let logical_cpus = heim::cpu::logical_count();
@@ -34,12 +33,12 @@ async fn main() -> heim::Result<()> {
     let user_sessions = heim::host::users();
     let virt = heim::virt::detect();
     // TODO: Retrieve other "static" info: current process + initial processes
-
     let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap) =
         try_join!(cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap)?;
     // NOTE: Asked heim author to make this consistent in issue heim#220
     let virt = virt.await;
     
+    // OS and virtualization properties
     println!("- Host platform is {} ({} {} {})",
              platform.hostname(),
              platform.system(),
@@ -50,9 +49,10 @@ async fn main() -> heim::Result<()> {
                            it doesn't bias your benchmark!", virt);
     }
 
+    // User session properties
     println!("- Logged-in user(s):");
     pin_mut!(user_sessions);
-    let mut usernames_to_sessions = HashMap::new();
+    let mut usernames_to_sessions = BTreeMap::new();
     while let Some(user) = user_sessions.next().await {
         // TODO: On Linux, decide if we want to collect OS-specific user info.
         //       Most of it seems useless, but I may try to print it out to
@@ -73,6 +73,7 @@ async fn main() -> heim::Result<()> {
                            users keep the system quiet during benchmarks!");
     }
 
+    // CPU properties
     print!("- {} logical CPU(s)", logical_cpus);
     if let Some(physical_cpus) = physical_cpus {
         print!(", {} physical core(s)", physical_cpus);
@@ -91,6 +92,7 @@ async fn main() -> heim::Result<()> {
         println!("unknown");
     }
 
+    // Memory properties
     println!("- {} of RAM, {} of swap",
            format_information(memory.total()),
            format_information(swap.total()));
@@ -100,8 +102,11 @@ async fn main() -> heim::Result<()> {
                format_information(swap.used()));
     }
 
+    // Filesystem mounts
     println!("- Filesystem mount(s):");
     pin_mut!(disk_partitions);
+    // TODO: Instead of displaying output of raw iteration, collect and sort by
+    //       mount point.
     while let Some(partition) = disk_partitions.next().await {
         let partition = partition?;
         // FIXME: Replace Debug printout with controlled format
@@ -119,16 +124,20 @@ async fn main() -> heim::Result<()> {
         }
     }
 
+    // Network interfaces
     println!("- Network interface(s):");
     pin_mut!(network_interfaces);
     while let Some(nic) = network_interfaces.next().await {
+        // TODO: Group by name and sort alphabetically using a BTreeMap
         // FIXME: Replace Debug printout with controlled format
         println!("    * {:?}", nic?);
     }
 
+    // Temperature sensors
     println!("- Temperature sensor(s):");
     pin_mut!(temperatures);
     while let Some(sensor) = temperatures.next().await {
+        // TODO: Group by unit and sort alphabetically using a BTreeMap
         let sensor = sensor?;
         print!("    * ");
         if let Some(label) = sensor.label() {
