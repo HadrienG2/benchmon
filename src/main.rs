@@ -37,7 +37,8 @@ async fn main() -> heim::Result<()> {
 
     let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap) =
         try_join!(cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap)?;
-    let virt = virt.await;  // FIXME: Ask heim author to make this consistent
+    // NOTE: Asked heim author to make this consistent in issue heim#220
+    let virt = virt.await;
     
     println!("- Host platform is {} ({} {} {})",
              platform.hostname(),
@@ -103,7 +104,7 @@ async fn main() -> heim::Result<()> {
     pin_mut!(disk_partitions);
     while let Some(partition) = disk_partitions.next().await {
         let partition = partition?;
-        // FIXME: Get rid of this Debug printout
+        // FIXME: Replace Debug printout with controlled format
         print!("    * {:?}, with ", partition);
         match heim::disk::usage(partition.mount_point()).await {
             Ok(usage) if usage.total() != Information::new::<byte>(0) => {
@@ -121,7 +122,7 @@ async fn main() -> heim::Result<()> {
     println!("- Network interface(s):");
     pin_mut!(network_interfaces);
     while let Some(nic) = network_interfaces.next().await {
-        // FIXME: Get rid of this Debug printout
+        // FIXME: Replace Debug printout with controlled format
         println!("    * {:?}", nic?);
     }
 
