@@ -7,11 +7,12 @@ use futures_util::{pin_mut, try_join};
 
 use heim::units::{
     frequency::megahertz,
-    information::{bit, gibibyte, mebibyte, tebibyte},
+    information::{byte, gigabyte, kilobyte, megabyte, terabyte},
+    thermodynamic_temperature::degree_celsius,
     Information,
 };
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 
 #[async_std::main]
@@ -19,46 +20,56 @@ async fn main() -> heim::Result<()> {
     // FIXME: Switch to a real logging system with timestamps. Maybe
     //        log+env_logger+kv? Or slog? Or another logger? Hierarchical and
     //        structured logging capabilities would be useful.
-    // FIXME: Reduce reliance on Debug printout, use our own format
     println!("Probing host system characteristics...");
 
     let cpu_frequency = heim::cpu::frequency();
     let disk_partitions = heim::disk::partitions();
     let logical_cpus = heim::cpu::logical_count();
+    let memory = heim::memory::memory();
+    let network_interfaces = heim::net::nic();
     let physical_cpus = heim::cpu::physical_count();
     let platform = heim::host::platform();
+    let swap = heim::memory::swap();
+    let temperatures = heim::sensors::temperatures();
     let user_sessions = heim::host::users();
     let virt = heim::virt::detect();
-    // TODO: Retrieve other "static" info: total memory, network interfaces,
-    //       current process + initial process list, sensor range
+    // TODO: Retrieve other "static" info: current process + initial processes
 
-    let (cpu_frequency, logical_cpus, physical_cpus, platform) =
-        try_join!(cpu_frequency, logical_cpus, physical_cpus, platform)?;
+    let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap) =
+        try_join!(cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap)?;
     let virt = virt.await;  // FIXME: Ask heim author to make this consistent
     
-    println!("- Host platform: {:#?}", platform);
+    println!("- Host platform is {} ({} {} {})",
+             platform.hostname(),
+             platform.system(),
+             platform.release(),
+             platform.version());
     if let Some(virt) = virt {
-        println!("WARNING: Virtualization platform {:?} detected, make sure \
-                           that it doesn't bias the kind of benchmark that \
-                           you are doing!", virt);
+        println!("WARNING: Virtualization host {:?} detected, make sure that \
+                           it doesn't bias your benchmark!", virt);
     }
 
     println!("- Logged-in user(s):");
     pin_mut!(user_sessions);
-    let mut unique_usernames = HashSet::new();
+    let mut usernames_to_sessions = HashMap::new();
     while let Some(user) = user_sessions.next().await {
-        // TODO: On linux, decide if we want to collect OS-specific user info.
+        // TODO: On Linux, decide if we want to collect OS-specific user info.
         //       Most of it seems useless, but I may try to print it out to
         //       check. And login process Pid could possibly be used to blame
         //       background load on another user. It's all speculative though.
-        unique_usernames.insert(user?.username().to_owned());
+        let username = user?.username().to_owned();
+        *usernames_to_sessions.entry(username).or_insert(0) += 1;
     }
-    for username in &unique_usernames {
-        println!("    * {}", username);
+    for (username, &session_count) in &usernames_to_sessions {
+        print!("    * {}", username);
+        if session_count > 1 {
+            print!(" ({} sessions)", session_count);
+        }
+        println!();
     }
-    if unique_usernames.len() > 1 {
+    if usernames_to_sessions.len() > 1 {
         println!("WARNING: Multiple users detected, make sure other logged-in \
-                           users are aware of your benchmarking activities!");
+                           users keep the system quiet during benchmarks!");
     }
 
     print!("- {} logical CPU(s)", logical_cpus);
@@ -67,8 +78,10 @@ async fn main() -> heim::Result<()> {
     } else {
         print!(" physical core count is unknown");
     }
+    print!(", architecture is {:?}", platform.architecture());
     // FIXME: On linux, query per-CPU frequency range, and print it instead of
-    //        the global info if it varies between cores (rare, but can happen).
+    //        the global info if it varies between cores (rare, but can happen,
+    //        especially in embedded architectures).
     print!(", frequency range is ");
     if let (Some(min), Some(max)) = (cpu_frequency.min(), cpu_frequency.max()) {
         println!("{} to {} MHz",
@@ -77,31 +90,64 @@ async fn main() -> heim::Result<()> {
         println!("unknown");
     }
 
-    println!("- Active filesystem mount(s):");
+    println!("- {} of RAM, {} of swap",
+           format_information(memory.total()),
+           format_information(swap.total()));
+    if swap.used() > swap.total() / 10 {
+        print!("WARNING: Non-negligible use of swap ({}) detected, make sure \
+                         that it doesn't bias your benchmark!",
+               format_information(swap.used()));
+    }
+
+    println!("- Filesystem mount(s):");
     pin_mut!(disk_partitions);
     while let Some(partition) = disk_partitions.next().await {
         let partition = partition?;
+        // FIXME: Get rid of this Debug printout
         print!("    * {:?}, with ", partition);
         match heim::disk::usage(partition.mount_point()).await {
-            Ok(usage) if usage.total() != Information::new::<bit>(0) => {
-                let capacity = usage.total();
-                print!("a total capacity of ");
-                // FIXME: Check uom docs, there has to be a better way
-                if capacity > Information::new::<tebibyte>(10) {
-                    println!("{} TiB", capacity.get::<tebibyte>());
-                } else if capacity > Information::new::<gibibyte>(10) {
-                    println!("{} GiB", capacity.get::<gibibyte>());
-                } else {
-                    println!("{} MiB", capacity.get::<mebibyte>());
-                }
+            Ok(usage) if usage.total() != Information::new::<byte>(0) => {
+                println!("a capacity of {}", format_information(usage.total()));
             },
             Ok(_) => {
-                println!("zero capacity (pseudo-filesystem?)");
+                println!("zero capacity (likely a pseudo-filesystem)");
             }
             Err(e) => {
-                println!("capacity check error {}", e);
+                println!("failing capacity check ({})", e);
             }
         }
+    }
+
+    println!("- Network interface(s):");
+    pin_mut!(network_interfaces);
+    while let Some(nic) = network_interfaces.next().await {
+        // FIXME: Get rid of this Debug printout
+        println!("    * {:?}", nic?);
+    }
+
+    println!("- Temperature sensor(s):");
+    pin_mut!(temperatures);
+    while let Some(sensor) = temperatures.next().await {
+        let sensor = sensor?;
+        print!("    * ");
+        if let Some(label) = sensor.label() {
+            print!("\"{}\"", label);
+        } else {
+            print!("Unlabeled sensor");
+        }
+        print!(" from unit \"{}\" (", sensor.unit());
+        if let Some(high) = sensor.high() {
+            print!("high: {} °C", high.get::<degree_celsius>());
+        } else {
+            print!("no high trip point");
+        }
+        print!(", ");
+        if let Some(critical) = sensor.critical() {
+            print!("critical: {} °C", critical.get::<degree_celsius>());
+        } else {
+            print!("no critical trip point");
+        }
+        println!(")");
     }
 
     // TODO: Extract this system summary to a separate async fn, then start
@@ -118,3 +164,29 @@ async fn main() -> heim::Result<()> {
 
     Ok(())
 }
+
+
+fn format_information(quantity: Information) -> String {
+    // FIXME: This can be optimized with a log-based jump table, and probably
+    //        deduplicated as well if I think hard enough about it.
+    if quantity > Information::new::<terabyte>(1) {
+        let terabytes = quantity.get::<terabyte>();
+        let gigabytes = quantity.get::<gigabyte>() - 1000 * terabytes;
+        format!("{}.{:03} TB", terabytes, gigabytes)
+    } else if quantity > Information::new::<gigabyte>(1) {
+        let gigabytes = quantity.get::<gigabyte>();
+        let megabytes = quantity.get::<megabyte>() - 1000 * gigabytes;
+        format!("{}.{:03} GB", gigabytes, megabytes)
+    } else if quantity > Information::new::<megabyte>(1) {
+        let megabytes = quantity.get::<megabyte>();
+        let kilobytes = quantity.get::<kilobyte>() - 1000 * megabytes;
+        format!("{}.{:03} MB", megabytes, kilobytes)
+    } else if quantity > Information::new::<kilobyte>(1) {
+        let kilobytes = quantity.get::<kilobyte>();
+        let bytes = quantity.get::<byte>() - 1000 * kilobytes;
+        format!("{}.{:03} kB", kilobytes, bytes)
+    } else {
+        format!("{} B", quantity.get::<byte>())
+    }
+}
+
