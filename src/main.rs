@@ -3,7 +3,11 @@
 
 use async_std::prelude::*;
 
-use futures_util::{pin_mut, try_join};
+use futures_util::{
+    future::FutureExt,
+    pin_mut,
+    try_join,
+};
 
 use heim::units::{
     frequency::megahertz,
@@ -31,12 +35,10 @@ async fn main() -> heim::Result<()> {
     let swap = heim::memory::swap();
     let temperatures = heim::sensors::temperatures();
     let user_sessions = heim::host::users();
-    let virt = heim::virt::detect();
+    let virt = heim::virt::detect().map(Ok);
     // TODO: Retrieve other "static" info: current process + initial processes
-    let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap) =
-        try_join!(cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap)?;
-    // NOTE: Asked heim author to make this consistent in issue heim#220
-    let virt = virt.await;
+    let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt) =
+        try_join!(cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt)?;
     
     // OS and virtualization properties
     println!("- Host platform is {} ({} {} {})",
