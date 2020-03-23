@@ -9,11 +9,14 @@ use futures_util::{
     try_join,
 };
 
-use heim::units::{
-    frequency::megahertz,
-    information::{byte, gigabyte, kilobyte, megabyte, terabyte},
-    thermodynamic_temperature::degree_celsius,
-    Information,
+use heim::{
+    host::Pid,
+    units::{
+        frequency::megahertz,
+        information::{byte, gigabyte, kilobyte, megabyte, terabyte},
+        thermodynamic_temperature::degree_celsius,
+        Information,
+    },
 };
 
 use std::collections::BTreeMap;
@@ -34,9 +37,9 @@ async fn main() -> heim::Result<()> {
     let platform = heim::host::platform();
     let swap = heim::memory::swap();
     let temperatures = heim::sensors::temperatures();
-    let user_sessions = heim::host::users();
+    let user_connections = heim::host::users();
     let virt = heim::virt::detect().map(Ok);
-    // TODO: Retrieve other "static" info: current process + initial processes
+    // TODO: Retrieve current process + initial processes info
     let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt) =
         try_join!(cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt)?;
     
@@ -51,26 +54,51 @@ async fn main() -> heim::Result<()> {
                            it doesn't bias your benchmark!", virt);
     }
 
-    // User session properties
-    println!("- Logged-in user(s):");
-    pin_mut!(user_sessions);
-    let mut usernames_to_sessions = BTreeMap::new();
-    while let Some(user) = user_sessions.next().await {
-        // TODO: On Linux, decide if we want to collect OS-specific user info.
-        //       Most of it seems useless, but I may try to print it out to
-        //       check. And login process Pid could possibly be used to blame
-        //       background load on another user. It's all speculative though.
-        let username = user?.username().to_owned();
-        *usernames_to_sessions.entry(username).or_insert(0) += 1;
-    }
-    for (username, &session_count) in &usernames_to_sessions {
-        print!("    * {}", username);
-        if session_count > 1 {
-            print!(" ({} sessions)", session_count);
+    // Connected user properties
+    type SessionId = i32;  // FIXME: Expose this
+    #[derive(Default)]
+    struct UserStats {
+        /// Total number of connections opened by this user
+        connection_count: usize,
+
+        /// Breakdown of these connections into sessions and login processes
+        /// (This data is, for now, only available on Linux)
+        sessions_to_pids: Option<BTreeMap<SessionId, Vec<Pid>>>,
+    };
+    //
+    pin_mut!(user_connections);
+    let mut usernames_to_stats = BTreeMap::<_, UserStats>::new();
+    while let Some(connection) = user_connections.next().await {
+        let connection = connection?;
+        let username = connection.username().to_owned();
+        let user_stats = usernames_to_stats.entry(username).or_default();
+        user_stats.connection_count += 1;
+        #[cfg(target_os = "linux")]
+        {
+            use heim::host::os::linux::UserExt;
+            let session_stats =
+                user_stats.sessions_to_pids.get_or_insert_with(Default::default)
+                                           .entry(connection.session_id())
+                                           .or_default();
+            session_stats.push(connection.pid());
+            // TODO: When I have a real logger, log full connection details just
+            //       in case some prove unexpectedly useful someday.
         }
-        println!();
     }
-    if usernames_to_sessions.len() > 1 {
+    println!("- Logged-in user(s):");
+    for (username, stats) in &usernames_to_stats {
+        print!("    * {} has {} open connection(s)", username, stats.connection_count);
+        if let Some(sessions_to_pids) = &stats.sessions_to_pids {
+            println!(", spread across {} session(s): ", sessions_to_pids.len());
+            for (session_id, login_pids) in sessions_to_pids {
+                println!("        o Session {} with login PID(s) {:?}",
+                         session_id, login_pids);
+            }
+        } else {
+            println!();
+        }
+    }
+    if usernames_to_stats.len() > 1 {
         println!("WARNING: Multiple users detected, make sure other logged-in \
                            users keep the system quiet during benchmarks!");
     }
@@ -86,12 +114,12 @@ async fn main() -> heim::Result<()> {
     // FIXME: On linux, query per-CPU frequency range, and print it instead of
     //        the global info if it varies between cores (rare, but can happen,
     //        especially in embedded architectures).
-    print!(", frequency range is ");
+    print!(", frequency ");
     if let (Some(min), Some(max)) = (cpu_frequency.min(), cpu_frequency.max()) {
-        println!("{} to {} MHz",
+        println!("ranges from {} to {} MHz",
                  min.get::<megahertz>(), max.get::<megahertz>());
     } else {
-        println!("unknown");
+        println!("range is unknown");
     }
 
     // Memory properties
