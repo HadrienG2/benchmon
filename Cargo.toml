@@ -18,3 +18,5 @@ heim = { version = "0.1.0-alpha", features = [ "cpu",
                                                "sensors",
                                                "runtime-async-std",
                                                "virt" ] }
+slog = "2.5"
+slog-term = "2.5"

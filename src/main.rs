@@ -1,13 +1,9 @@
 // FIXME: I probably need to have a word with the heim dev about this
-#![type_length_limit="20000000"]
+#![type_length_limit = "20000000"]
 
 use async_std::prelude::*;
 
-use futures_util::{
-    future::FutureExt,
-    pin_mut,
-    try_join,
-};
+use futures_util::{future::FutureExt, pin_mut, try_join};
 
 use heim::{
     host::Pid,
@@ -19,15 +15,20 @@ use heim::{
     },
 };
 
-use std::collections::BTreeMap;
+use slog::{debug, info, o, warn, Drain};
 
+use std::{collections::BTreeMap, sync::Mutex};
 
 #[async_std::main]
 async fn main() -> heim::Result<()> {
-    // FIXME: Switch to a real logging system with timestamps. Maybe
-    //        log+env_logger+kv? Or slog? Or another logger? Hierarchical and
-    //        structured logging capabilities would be useful.
-    println!("Probing host system characteristics...");
+    // Set up a logger
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::CompactFormat::new(decorator).build();
+    let drain = Mutex::new(drain).fuse();
+    let log = slog::Logger::root(drain, o!("benchmon version" => env!("CARGO_PKG_VERSION")));
+
+    // Query all system info at once, since heim is asynchronous...
+    info!(log, "Probing host system characteristics...");
     let cpu_frequency = heim::cpu::frequency();
     let disk_partitions = heim::disk::partitions();
     let logical_cpus = heim::cpu::logical_count();
@@ -40,22 +41,36 @@ async fn main() -> heim::Result<()> {
     let user_connections = heim::host::users();
     let virt = heim::virt::detect().map(Ok);
     // TODO: Retrieve current process + initial processes info
-    let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt) =
-        try_join!(cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt)?;
-    
-    // OS and virtualization properties
-    println!("- Host platform is {} ({} {} {})",
-             platform.hostname(),
-             platform.system(),
-             platform.release(),
-             platform.version());
+    let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt) = try_join!(
+        cpu_frequency,
+        logical_cpus,
+        memory,
+        physical_cpus,
+        platform,
+        swap,
+        virt
+    )?;
+
+    // OS and virtualization report
+    info!(
+        log,
+        "Received host OS information";
+        "hostname" => platform.hostname(),
+        "OS name" => platform.system(),
+        "OS release" => platform.release(),
+        "OS version" => platform.version()
+    );
     if let Some(virt) = virt {
-        println!("WARNING: Virtualization host {:?} detected, make sure that \
-                           it doesn't bias your benchmark!", virt);
+        warn!(
+            log,
+            "Detected underlying virtualization layers, make sure that they \
+             don't bias your benchmarks!";
+            "detected virtualization scheme" => ?virt
+        );
     }
 
-    // Connected user properties
-    type SessionId = i32;  // FIXME: Expose this
+    // User session report
+    type SessionId = i32; // FIXME: Make heim expose this
     #[derive(Default)]
     struct UserStats {
         /// Total number of connections opened by this user
@@ -68,42 +83,59 @@ async fn main() -> heim::Result<()> {
     //
     pin_mut!(user_connections);
     let mut usernames_to_stats = BTreeMap::<_, UserStats>::new();
+    info!(log, "Enumerating user connections...");
     while let Some(connection) = user_connections.next().await {
         let connection = connection?;
         let username = connection.username().to_owned();
+        let user_log = log.new(o!("username" => username.clone()));
+        debug!(user_log, "Found a new user connection");
         let user_stats = usernames_to_stats.entry(username).or_default();
         user_stats.connection_count += 1;
         #[cfg(target_os = "linux")]
         {
             use heim::host::os::linux::UserExt;
-            let session_stats =
-                user_stats.sessions_to_pids.get_or_insert_with(Default::default)
-                                           .entry(connection.session_id())
-                                           .or_default();
+            debug!(user_log,
+                   "Got linux-specific connection details";
+                   "login process PID" => connection.pid(),
+                   "(pseudo-)tty name" => connection.terminal(),
+                   "terminal identifier" => connection.id(),
+                   "remote hostname" => connection.hostname(),
+                   "remote IP address" => ?connection.address(),
+                   "session ID" => connection.session_id());
+            let session_stats = user_stats
+                .sessions_to_pids
+                .get_or_insert_with(Default::default)
+                .entry(connection.session_id())
+                .or_default();
             session_stats.push(connection.pid());
-            // TODO: When I have a real logger, log full connection details just
-            //       in case some prove unexpectedly useful someday.
         }
     }
-    println!("- Logged-in user(s):");
+    //
     for (username, stats) in &usernames_to_stats {
-        print!("    * {} has {} open connection(s)", username, stats.connection_count);
+        let user_log = log.new(o!("username" => username.clone()));
+        info!(user_log, "Found a logged-in user";
+              "open connection count" => stats.connection_count);
         if let Some(sessions_to_pids) = &stats.sessions_to_pids {
-            println!(", spread across {} session(s): ", sessions_to_pids.len());
             for (session_id, login_pids) in sessions_to_pids {
-                println!("        o Session {} with login PID(s) {:?}",
-                         session_id, login_pids);
+                info!(user_log,
+                      "Got user session details";
+                      "session ID" => session_id,
+                      "login process PIDs" => ?login_pids);
             }
-        } else {
-            println!();
         }
     }
+    //
     if usernames_to_stats.len() > 1 {
-        println!("WARNING: Multiple users detected, make sure other logged-in \
-                           users keep the system quiet during benchmarks!");
+        warn!(
+            log,
+            "Detected multiple logged-in users, make sure others keep the \
+             system quiet while your benchmarks are running!"
+        );
     }
 
-    // CPU properties
+    // TODO: Finish work-in-progress slog port
+
+    // CPU report
     print!("- {} logical CPU(s)", logical_cpus);
     if let Some(physical_cpus) = physical_cpus {
         print!(", {} physical core(s)", physical_cpus);
@@ -116,20 +148,27 @@ async fn main() -> heim::Result<()> {
     //        especially in embedded architectures).
     print!(", frequency ");
     if let (Some(min), Some(max)) = (cpu_frequency.min(), cpu_frequency.max()) {
-        println!("ranges from {} to {} MHz",
-                 min.get::<megahertz>(), max.get::<megahertz>());
+        println!(
+            "ranges from {} to {} MHz",
+            min.get::<megahertz>(),
+            max.get::<megahertz>()
+        );
     } else {
         println!("range is unknown");
     }
 
     // Memory properties
-    println!("- {} of RAM, {} of swap",
-           format_information(memory.total()),
-           format_information(swap.total()));
+    println!(
+        "- {} of RAM, {} of swap",
+        format_information(memory.total()),
+        format_information(swap.total())
+    );
     if swap.used() > swap.total() / 10 {
-        print!("WARNING: Non-negligible use of swap ({}) detected, make sure \
+        print!(
+            "WARNING: Non-negligible use of swap ({}) detected, make sure \
                          that it doesn't bias your benchmark!",
-               format_information(swap.used()));
+            format_information(swap.used())
+        );
     }
 
     // Filesystem mounts
@@ -144,7 +183,7 @@ async fn main() -> heim::Result<()> {
         match heim::disk::usage(partition.mount_point()).await {
             Ok(usage) if usage.total() != Information::new::<byte>(0) => {
                 println!("a capacity of {}", format_information(usage.total()));
-            },
+            }
             Ok(_) => {
                 println!("zero capacity (likely a pseudo-filesystem)");
             }
@@ -205,7 +244,6 @@ async fn main() -> heim::Result<()> {
     Ok(())
 }
 
-
 fn format_information(quantity: Information) -> String {
     // FIXME: This can be optimized with a log-based jump table, and probably
     //        deduplicated as well if I think hard enough about it.
@@ -229,4 +267,3 @@ fn format_information(quantity: Information) -> String {
         format!("{} B", quantity.get::<byte>())
     }
 }
-
