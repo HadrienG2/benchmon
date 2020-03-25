@@ -1,17 +1,23 @@
 // FIXME: I probably need to have a word with the heim dev about this
 #![type_length_limit = "40000000"]
 
-use futures_util::{future::FutureExt, pin_mut, stream::StreamExt, try_join};
+use futures_util::{
+    future::FutureExt,
+    pin_mut,
+    stream::{Stream, StreamExt},
+    try_join,
+};
 
 use heim::{
     cpu::CpuFrequency,
-    host::Pid,
+    host::{Arch, Pid, Platform, User},
     units::{
         frequency::megahertz,
         information::{byte, gigabyte, kilobyte, megabyte, terabyte},
         thermodynamic_temperature::degree_celsius,
         Information,
     },
+    virt::Virtualization,
 };
 
 use slog::{debug, info, o, warn, Drain, Logger};
@@ -26,11 +32,18 @@ async fn main() -> heim::Result<()> {
     let drain = Mutex::new(drain).fuse();
     let log = slog::Logger::root(drain, o!("benchmon version" => env!("CARGO_PKG_VERSION")));
 
-    // Query all system info at once, since heim is asynchronous...
+    // Query all system info at once, leveraging heim's asynchronous nature...
     info!(log, "Probing host system characteristics...");
     let global_cpu_freq = heim::cpu::frequency();
+    let per_cpu_freqs;
     #[cfg(target_os = "linux")]
-    let linux_cpu_freqs = heim::cpu::os::linux::frequencies();
+    {
+        per_cpu_freqs = Some(heim::cpu::os::linux::frequencies());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        per_cpu_freqs = None;
+    }
     let disk_partitions = heim::disk::partitions();
     let logical_cpus = heim::cpu::logical_count();
     let memory = heim::memory::memory();
@@ -52,148 +65,24 @@ async fn main() -> heim::Result<()> {
         virt
     )?;
 
-    // OS and virtualization report
-    info!(
-        log,
-        "Received host OS information";
-        "hostname" => platform.hostname(),
-        "OS name" => platform.system(),
-        "OS release" => platform.release(),
-        "OS version" => platform.version()
-    );
-    if let Some(virt) = virt {
-        warn!(
-            log,
-            "Found underlying virtualization layers, make sure that they don't \
-             bias your benchmarks!";
-            "detected virtualization scheme" => ?virt
-        );
-    }
+    // Report on operating system and use of virtualization
+    // (CPU architecture doesn't really belong here and will be displayed later)
+    let cpu_arch = platform.architecture();
+    report_os(&log, platform, virt);
 
-    // User session report
-    type SessionId = i32; // FIXME: Make heim expose this
-    #[derive(Default)]
-    struct UserStats {
-        /// Total number of connections opened by this user
-        connection_count: usize,
+    // Report on open user sessions
+    report_users(&log, user_connections).await?;
 
-        /// Breakdown of these connections into sessions and login processes
-        /// (This data is, for now, only available on Linux)
-        sessions_to_pids: Option<BTreeMap<SessionId, Vec<Pid>>>,
-    };
-    //
-    pin_mut!(user_connections);
-    let mut usernames_to_stats = BTreeMap::<_, UserStats>::new();
-    info!(log, "Enumerating user connections...");
-    while let Some(connection) = user_connections.next().await {
-        let connection = connection?;
-        let username = connection.username().to_owned();
-        let user_log = log.new(o!("username" => username.clone()));
-        debug!(user_log, "Found a new user connection");
-        let user_stats = usernames_to_stats.entry(username).or_default();
-        user_stats.connection_count += 1;
-        #[cfg(target_os = "linux")]
-        {
-            use heim::host::os::linux::UserExt;
-            debug!(user_log,
-                   "Got Linux-specific connection details";
-                   "login process PID" => connection.pid(),
-                   "(pseudo-)tty name" => connection.terminal(),
-                   "terminal identifier" => connection.id(),
-                   "remote hostname" => connection.hostname(),
-                   "remote IP address" => ?connection.address(),
-                   "session ID" => connection.session_id());
-            let session_stats = user_stats
-                .sessions_to_pids
-                .get_or_insert_with(Default::default)
-                .entry(connection.session_id())
-                .or_default();
-            session_stats.push(connection.pid());
-        }
-    }
-    //
-    for (username, stats) in &usernames_to_stats {
-        let user_log = log.new(o!("username" => username.clone()));
-        info!(user_log, "Found a logged-in user";
-              "open connection count" => stats.connection_count);
-        if let Some(sessions_to_pids) = &stats.sessions_to_pids {
-            for (session_id, login_pids) in sessions_to_pids {
-                info!(user_log,
-                      "Got user session details";
-                      "session ID" => session_id,
-                      "login process PIDs" => ?login_pids);
-            }
-        }
-    }
-    //
-    if usernames_to_stats.len() > 1 {
-        warn!(
-            log,
-            "Detected multiple logged-in users, make sure others keep the \
-             system quiet while your benchmarks are running!"
-        );
-    }
-
-    // CPU report
-    info!(log, "Received CPU configuration information";
-          "architecture" => ?platform.architecture(),
-          "logical CPU count" => logical_cpus,
-          "physical CPU count" => physical_cpus);
-    //
-    let log_freq_range = |log: &Logger, title: &str, freq: &CpuFrequency| {
-        if let (Some(min), Some(max)) = (freq.min(), freq.max()) {
-            info!(log, "Found {} frequency range", title;
-                  "min frequency (MHz)" => min.get::<megahertz>(),
-                  "max frequency (MHz)" => max.get::<megahertz>());
-        } else {
-            warn!(log, "Some {} frequency range data is missing", title;
-                  "min frequency" => ?freq.min(),
-                  "max frequency" => ?freq.max());
-        }
-    };
-    let mut printing_detailed_freqs = false;
-    //
-    // For now, heim only provides per-CPU frequency information on Linux.
-    //
-    // On this OS, check if the per-CPU frequency ranges differ from the global
-    // frequency range. This can happen on some embedded architectures (e.g. ARM
-    // big.LITTLE), but should be rare on a typical benchmarking node.
-    //
-    // If it does happen, print the per-CPU freq range breakdown. Otherwise,
-    // stick with the cross-platform & concise global frequency range printout.
-    #[cfg(target_os = "linux")]
-    {
-        let global_freq_range = (global_cpu_freq.min(), global_cpu_freq.max());
-        let cpu_indices_and_freqs = linux_cpu_freqs.enumerate();
-        pin_mut!(cpu_indices_and_freqs);
-        debug!(log, "Running on Linux: Enumerating per-CPU frequency ranges...");
-        while let Some((idx, freq)) = cpu_indices_and_freqs.next().await {
-            let cpu_log = log.new(o!("logical cpu index" => idx));
-            let freq = freq?;
-            if printing_detailed_freqs {
-                log_freq_range(&cpu_log, "per-CPU", &freq);
-            } else if (freq.min(), freq.max()) != global_freq_range {
-                printing_detailed_freqs = true;
-                for old_idx in 0..idx {
-                    let old_cpu_log = log.new(o!("logical cpu index" => old_idx));
-                    log_freq_range(&old_cpu_log, "per-CPU", &global_cpu_freq);
-                }
-                log_freq_range(&cpu_log, "per-CPU", &freq);
-            }
-        }
-
-        if !printing_detailed_freqs {
-            debug!(
-                log,
-                "Per-CPU frequency ranges match global frequency range, no \
-                 need for a detailed breakdown!"
-            );
-        }
-    }
-    //
-    if !printing_detailed_freqs {
-        log_freq_range(&log, "global CPU", &global_cpu_freq);
-    }
+    // Report on CPU configuration
+    report_cpus(
+        &log,
+        cpu_arch,
+        logical_cpus,
+        physical_cpus,
+        global_cpu_freq,
+        per_cpu_freqs,
+    )
+    .await?;
 
     // TODO: Finish work-in-progress slog port
 
@@ -284,6 +173,176 @@ async fn main() -> heim::Result<()> {
     Ok(())
 }
 
+/// Report on the host' operating system and use of virtualization
+fn report_os(log: &Logger, platform: Platform, virt: Option<Virtualization>) {
+    info!(
+        log,
+        "Received host OS information";
+        "hostname" => platform.hostname(),
+        "OS name" => platform.system(),
+        "OS release" => platform.release(),
+        "OS version" => platform.version()
+    );
+    if let Some(virt) = virt {
+        warn!(
+            log,
+            "Found underlying virtualization layers, make sure that they don't \
+             bias your benchmarks!";
+            "detected virtualization scheme" => ?virt
+        );
+    }
+}
+
+/// Report on the host' open user sessions
+async fn report_users(
+    log: &Logger,
+    user_connections: impl Stream<Item = heim::Result<User>>,
+) -> heim::Result<()> {
+    // TODO: Consider returning some of this for future use
+    type SessionId = i32; // FIXME: Make heim expose this
+    #[derive(Default)]
+    struct UserStats {
+        /// Total number of connections opened by this user
+        connection_count: usize,
+
+        /// Breakdown of these connections into sessions and login processes
+        /// (This data is, for now, only available on Linux)
+        sessions_to_pids: Option<BTreeMap<SessionId, Vec<Pid>>>,
+    };
+    let mut usernames_to_stats = BTreeMap::<_, UserStats>::new();
+
+    info!(log, "Enumerating user connections...");
+    pin_mut!(user_connections);
+    while let Some(connection) = user_connections.next().await {
+        let connection = connection?;
+        let username = connection.username().to_owned();
+        let user_log = log.new(o!("username" => username.clone()));
+        debug!(user_log, "Found a new user connection");
+
+        let user_stats = usernames_to_stats.entry(username).or_default();
+        user_stats.connection_count += 1;
+
+        #[cfg(target_os = "linux")]
+        {
+            use heim::host::os::linux::UserExt;
+            debug!(user_log,
+                   "Got Linux-specific connection details";
+                   "login process PID" => connection.pid(),
+                   "(pseudo-)tty name" => connection.terminal(),
+                   "terminal identifier" => connection.id(),
+                   "remote hostname" => connection.hostname(),
+                   "remote IP address" => ?connection.address(),
+                   "session ID" => connection.session_id());
+            let session_stats = user_stats
+                .sessions_to_pids
+                .get_or_insert_with(Default::default)
+                .entry(connection.session_id())
+                .or_default();
+            session_stats.push(connection.pid());
+        }
+    }
+
+    for (username, stats) in &usernames_to_stats {
+        let user_log = log.new(o!("username" => username.clone()));
+        info!(user_log, "Found a logged-in user";
+              "open connection count" => stats.connection_count);
+        if let Some(sessions_to_pids) = &stats.sessions_to_pids {
+            for (session_id, login_pids) in sessions_to_pids {
+                info!(user_log,
+                      "Got user session details";
+                      "session ID" => session_id,
+                      "login process PIDs" => ?login_pids);
+            }
+        }
+    }
+
+    if usernames_to_stats.len() > 1 {
+        warn!(
+            log,
+            "Detected multiple logged-in users, make sure others keep the \
+             system quiet while your benchmarks are running!"
+        );
+    }
+
+    Ok(())
+}
+
+/// Report on the host's CPU configuration
+async fn report_cpus(
+    log: &Logger,
+    cpu_arch: Arch,
+    logical_cpus: u64,
+    physical_cpus: Option<u64>,
+    global_cpu_freq: CpuFrequency,
+    per_cpu_freqs: Option<impl Stream<Item = heim::Result<CpuFrequency>>>,
+) -> heim::Result<()> {
+    info!(log, "Received CPU configuration information";
+          "architecture" => ?cpu_arch,
+          "logical CPU count" => logical_cpus,
+          "physical CPU count" => physical_cpus);
+
+    let log_freq_range = |log: &Logger, title: &str, freq: &CpuFrequency| {
+        if let (Some(min), Some(max)) = (freq.min(), freq.max()) {
+            info!(log, "Found {} frequency range", title;
+                  "min frequency (MHz)" => min.get::<megahertz>(),
+                  "max frequency (MHz)" => max.get::<megahertz>());
+        } else {
+            warn!(log, "Some {} frequency range data is missing", title;
+                  "min frequency" => ?freq.min(),
+                  "max frequency" => ?freq.max());
+        }
+    };
+
+    // If a per-CPU frequency breakdown is available, check if the frequency
+    // range differs from one CPU to another. This can happen on some embedded
+    // architectures (ARM big.LITTLE comes to mind), but should be rare on the
+    // typical x86-ish benchmarking node.
+    //
+    // If the frequency range is CPU-dependent, log the detailed breakdown,
+    // otherwise stick with the cross-platform default of only printing the
+    // global CPU frequency range, since it's more concise.
+    //
+    let mut printing_detailed_freqs = false;
+    if let Some(per_cpu_freqs) = per_cpu_freqs {
+        let global_freq_range = (global_cpu_freq.min(), global_cpu_freq.max());
+        let cpu_indices_and_freqs = per_cpu_freqs.enumerate();
+        debug!(
+            log,
+            "Per-CPU frequency ranges are available, enumerating them..."
+        );
+        pin_mut!(cpu_indices_and_freqs);
+        while let Some((idx, freq)) = cpu_indices_and_freqs.next().await {
+            let cpu_log = log.new(o!("logical cpu index" => idx));
+            let freq = freq?;
+            if printing_detailed_freqs {
+                log_freq_range(&cpu_log, "per-CPU", &freq);
+            } else if (freq.min(), freq.max()) != global_freq_range {
+                printing_detailed_freqs = true;
+                for old_idx in 0..idx {
+                    let old_cpu_log = log.new(o!("logical cpu index" => old_idx));
+                    log_freq_range(&old_cpu_log, "per-CPU", &global_cpu_freq);
+                }
+                log_freq_range(&cpu_log, "per-CPU", &freq);
+            }
+        }
+
+        if !printing_detailed_freqs {
+            debug!(
+                log,
+                "Per-CPU frequency ranges match global frequency range, no \
+                 need for a detailed breakdown!"
+            );
+        }
+    }
+
+    if !printing_detailed_freqs {
+        log_freq_range(&log, "global CPU", &global_cpu_freq);
+    }
+
+    Ok(())
+}
+
+/// Pretty-print a quantity of information from heim
 fn format_information(quantity: Information) -> String {
     // FIXME: This can be optimized with a log-based jump table, and probably
     //        deduplicated as well if I think hard enough about it.
