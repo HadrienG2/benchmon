@@ -13,11 +13,12 @@ use heim::{
     disk::Partition,
     host::{Arch, Pid, Platform, User},
     memory::{Memory, Swap},
+    sensors::TemperatureSensor,
     units::{
         frequency::megahertz,
         information::{byte, gigabyte, kilobyte, megabyte, terabyte},
         thermodynamic_temperature::degree_celsius,
-        Information,
+        Information, ThermodynamicTemperature as Temperature,
     },
     virt::Virtualization,
 };
@@ -91,37 +92,16 @@ async fn main() -> heim::Result<()> {
     }
 
     // Report temperature sensors
-    println!("- Temperature sensor(s):");
-    pin_mut!(temperatures);
-    while let Some(sensor) = temperatures.next().await {
-        // TODO: Group by unit and sort alphabetically using a BTreeMap
-        let sensor = sensor?;
-        print!("    * ");
-        if let Some(label) = sensor.label() {
-            print!("\"{}\"", label);
-        } else {
-            print!("Unlabeled sensor");
-        }
-        print!(" from unit \"{}\" (", sensor.unit());
-        if let Some(high) = sensor.high() {
-            print!("high: {} °C", high.get::<degree_celsius>());
-        } else {
-            print!("no high trip point");
-        }
-        print!(", ");
-        if let Some(critical) = sensor.critical() {
-            print!("critical: {} °C", critical.get::<degree_celsius>());
-        } else {
-            print!("no critical trip point");
-        }
-        println!(")");
-    }
+    report_temp_sensors(&log, temperatures).await?;
 
     // Report operating system and use of virtualization
     report_os(&log, platform, virt);
 
     // Report open user sessions
     report_users(&log, user_connections).await?;
+
+    // TODO: Report on processes, highlighting this one and maybe trying to
+    //       trace each down to a user login process or PID 1 too.
 
     // TODO: Extract this system summary to a separate async fn, then start
     //       polling useful "dynamic" quantities in a system monitor like
@@ -134,101 +114,6 @@ async fn main() -> heim::Result<()> {
     //       manual inspection to begin with, and later implement direct
     //       support for fancy plots (with plotters? plotly?)
     // TODO: Add a way to selectively enable/disable stats.
-
-    Ok(())
-}
-
-/// Report on the host' operating system and use of virtualization
-fn report_os(log: &Logger, platform: Platform, virt: Option<Virtualization>) {
-    info!(
-        log,
-        "Received host OS information";
-        "hostname" => platform.hostname(),
-        "OS name" => platform.system(),
-        "OS release" => platform.release(),
-        "OS version" => platform.version()
-    );
-
-    if let Some(virt) = virt {
-        warn!(
-            log,
-            "Found underlying virtualization layers, make sure that they don't \
-             bias your benchmarks!";
-            "detected virtualization scheme" => ?virt
-        );
-    }
-}
-
-/// Report on the host' open user sessions
-async fn report_users(
-    log: &Logger,
-    user_connections: impl Stream<Item = heim::Result<User>>,
-) -> heim::Result<()> {
-    // TODO: Consider returning some of this for future use
-    type SessionId = i32; // FIXME: Make heim expose this
-    #[derive(Default)]
-    struct UserStats {
-        /// Total number of connections opened by this user
-        connection_count: usize,
-
-        /// Breakdown of these connections into sessions and login processes
-        /// (This data is, for now, only available on Linux)
-        sessions_to_pids: Option<BTreeMap<SessionId, Vec<Pid>>>,
-    };
-    let mut usernames_to_stats = BTreeMap::<_, UserStats>::new();
-
-    info!(log, "Enumerating user connections...");
-    pin_mut!(user_connections);
-    while let Some(connection) = user_connections.next().await {
-        let connection = connection?;
-        let username = connection.username().to_owned();
-        let user_log = log.new(o!("username" => username.clone()));
-        debug!(user_log, "Found a new user connection");
-
-        let user_stats = usernames_to_stats.entry(username).or_default();
-        user_stats.connection_count += 1;
-
-        #[cfg(target_os = "linux")]
-        {
-            use heim::host::os::linux::UserExt;
-            debug!(user_log,
-                   "Got Linux-specific connection details";
-                   "login process PID" => connection.pid(),
-                   "(pseudo-)tty name" => connection.terminal(),
-                   "terminal identifier" => connection.id(),
-                   "remote hostname" => connection.hostname(),
-                   "remote IP address" => ?connection.address(),
-                   "session ID" => connection.session_id());
-            let session_stats = user_stats
-                .sessions_to_pids
-                .get_or_insert_with(Default::default)
-                .entry(connection.session_id())
-                .or_default();
-            session_stats.push(connection.pid());
-        }
-    }
-
-    for (username, stats) in &usernames_to_stats {
-        let user_log = log.new(o!("username" => username.clone()));
-        info!(user_log, "Found a logged-in user";
-              "open connection count" => stats.connection_count);
-        if let Some(sessions_to_pids) = &stats.sessions_to_pids {
-            for (session_id, login_pids) in sessions_to_pids {
-                info!(user_log,
-                      "Got user session details";
-                      "session ID" => session_id,
-                      "login process PID(s)" => ?login_pids);
-            }
-        }
-    }
-
-    if usernames_to_stats.len() > 1 {
-        warn!(
-            log,
-            "Detected multiple logged-in users, make sure others keep the \
-             system quiet while your benchmarks are running!"
-        );
-    }
 
     Ok(())
 }
@@ -325,7 +210,10 @@ fn report_memory(log: &Logger, memory: Memory, swap: Swap) {
 }
 
 // Report on the host's file system configuration
-async fn report_filesystem(log: &Logger, disk_partitions: impl Stream<Item=heim::Result<Partition>>) -> heim::Result<()> {
+async fn report_filesystem(
+    log: &Logger,
+    disk_partitions: impl Stream<Item = heim::Result<Partition>>,
+) -> heim::Result<()> {
     info!(log, "Enumerating filesystem mounts...");
     pin_mut!(disk_partitions);
     let mut dev_to_mounts = BTreeMap::<_, Vec<_>>::new();
@@ -336,9 +224,10 @@ async fn report_filesystem(log: &Logger, disk_partitions: impl Stream<Item=heim:
         // as a last-resort disambiguation key for mounts with identical device
         // name & size (e.g. unrelated tmpfs mounts on Linux).
         let usage = heim::disk::usage(partition.mount_point()).await;
-        let known_used_bytes = usage.as_ref()
-                                    .map(|usage| usage.used().get::<byte>())
-                                    .unwrap_or(0);
+        let known_used_bytes = usage
+            .as_ref()
+            .map(|usage| usage.used().get::<byte>())
+            .unwrap_or(0);
         let capacity = usage.map(|usage| usage.total().clone());
 
         // Need to eagerly format device stats as otherwise they can't be used
@@ -356,21 +245,160 @@ async fn report_filesystem(log: &Logger, disk_partitions: impl Stream<Item=heim:
 
         // Group moint points by sorted device name, then capacity, then
         // filesystem, and finally our hidden used storage disambiguation key.
-        let mount_list =
-            dev_to_mounts.entry((formatted_device,
-                                 formatted_capacity,
-                                 formatted_filesystem,
-                                 known_used_bytes))
-                         .or_default();
+        let mount_list = dev_to_mounts
+            .entry((
+                formatted_device,
+                formatted_capacity,
+                formatted_filesystem,
+                known_used_bytes,
+            ))
+            .or_default();
         mount_list.push(partition.mount_point().to_owned());
     }
 
-    for ((device, capacity, file_system, _used_bytes), mount_point) in dev_to_mounts {
+    for ((device, capacity, file_system, _used_bytes), mut mount_list) in dev_to_mounts {
+        mount_list.sort();
         info!(log, "Found a mounted device";
               "device name" => device,
               "capacity" => capacity,
               "file system" => file_system,
-              "mount point(s)" => ?mount_point);
+              "mount point(s)" => ?mount_list);
+    }
+
+    Ok(())
+}
+
+/// Report on the host's temperature sensors
+async fn report_temp_sensors(
+    log: &Logger,
+    temperatures: impl Stream<Item = heim::Result<TemperatureSensor>>,
+) -> heim::Result<()> {
+    // TODO: Consider exposing this later on
+    struct SensorProperties {
+        label: Option<String>,
+        high_trip_point: Option<Temperature>,
+        critical_trip_point: Option<Temperature>,
+    }
+    let mut unit_to_sensors = BTreeMap::<_, Vec<_>>::new();
+
+    info!(log, "Enumerating temperature sensors...");
+    pin_mut!(temperatures);
+    while let Some(sensor) = temperatures.next().await {
+        let sensor = sensor?;
+        let sensor_list = unit_to_sensors.entry(sensor.unit().to_owned()).or_default();
+        sensor_list.push(SensorProperties {
+            label: sensor.label().map(|label| label.to_owned()),
+            high_trip_point: sensor.high(),
+            critical_trip_point: sensor.critical(),
+        });
+    }
+
+    for (unit, mut sensor_list) in unit_to_sensors {
+        let unit_log = log.new(o!("sensor unit" => unit));
+        sensor_list.sort_by_cached_key(|sensor| sensor.label.clone());
+        for sensor in sensor_list {
+            let to_celsius = |t_opt: Option<Temperature>| t_opt.map(|t| t.get::<degree_celsius>());
+            info!(unit_log, "Found a temperature sensor";
+                  "label" => sensor.label,
+                  "high trip point (°C)" => to_celsius(sensor.high_trip_point),
+                  "critical trip point (°C)" => to_celsius(sensor.critical_trip_point));
+        }
+    }
+
+    Ok(())
+}
+
+/// Report on the host's operating system and use of virtualization
+fn report_os(log: &Logger, platform: Platform, virt: Option<Virtualization>) {
+    info!(
+        log,
+        "Received host OS information";
+        "hostname" => platform.hostname(),
+        "OS name" => platform.system(),
+        "OS release" => platform.release(),
+        "OS version" => platform.version()
+    );
+
+    if let Some(virt) = virt {
+        warn!(
+            log,
+            "Found underlying virtualization layers, make sure that they don't \
+             bias your benchmarks!";
+            "detected virtualization scheme" => ?virt
+        );
+    }
+}
+
+/// Report on the host's open user sessions
+async fn report_users(
+    log: &Logger,
+    user_connections: impl Stream<Item = heim::Result<User>>,
+) -> heim::Result<()> {
+    // TODO: Consider returning some of this for future use
+    type SessionId = i32; // FIXME: Make heim expose this
+    #[derive(Default)]
+    struct UserStats {
+        /// Total number of connections opened by this user
+        connection_count: usize,
+
+        /// Breakdown of these connections into sessions and login processes
+        /// (This data is, for now, only available on Linux)
+        sessions_to_pids: Option<BTreeMap<SessionId, Vec<Pid>>>,
+    };
+    let mut usernames_to_stats = BTreeMap::<_, UserStats>::new();
+
+    info!(log, "Enumerating user connections...");
+    pin_mut!(user_connections);
+    while let Some(connection) = user_connections.next().await {
+        let connection = connection?;
+        let username = connection.username().to_owned();
+        let user_log = log.new(o!("username" => username.clone()));
+        debug!(user_log, "Found a new user connection");
+
+        let user_stats = usernames_to_stats.entry(username).or_default();
+        user_stats.connection_count += 1;
+
+        #[cfg(target_os = "linux")]
+        {
+            use heim::host::os::linux::UserExt;
+            debug!(user_log,
+                   "Got Linux-specific connection details";
+                   "login process PID" => connection.pid(),
+                   "(pseudo-)tty name" => connection.terminal(),
+                   "terminal identifier" => connection.id(),
+                   "remote hostname" => connection.hostname(),
+                   "remote IP address" => ?connection.address(),
+                   "session ID" => connection.session_id());
+            let session_stats = user_stats
+                .sessions_to_pids
+                .get_or_insert_with(Default::default)
+                .entry(connection.session_id())
+                .or_default();
+            session_stats.push(connection.pid());
+        }
+    }
+
+    for (username, stats) in &mut usernames_to_stats {
+        let user_log = log.new(o!("username" => username.clone()));
+        info!(user_log, "Found a logged-in user";
+              "open connection count" => stats.connection_count);
+        if let Some(ref mut sessions_to_pids) = &mut stats.sessions_to_pids {
+            for (session_id, login_pids) in sessions_to_pids {
+                login_pids.sort();
+                info!(user_log,
+                      "Got user session details";
+                      "session ID" => session_id,
+                      "login process PID(s)" => ?login_pids);
+            }
+        }
+    }
+
+    if usernames_to_stats.len() > 1 {
+        warn!(
+            log,
+            "Detected multiple logged-in users, make sure others keep the \
+             system quiet while your benchmarks are running!"
+        );
     }
 
     Ok(())
