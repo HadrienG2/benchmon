@@ -1,11 +1,10 @@
 // FIXME: I probably need to have a word with the heim dev about this
-#![type_length_limit = "20000000"]
+#![type_length_limit = "40000000"]
 
-use async_std::prelude::*;
-
-use futures_util::{future::FutureExt, pin_mut, try_join};
+use futures_util::{future::FutureExt, pin_mut, stream::StreamExt, try_join};
 
 use heim::{
+    cpu::CpuFrequency,
     host::Pid,
     units::{
         frequency::megahertz,
@@ -15,7 +14,7 @@ use heim::{
     },
 };
 
-use slog::{debug, info, o, warn, Drain};
+use slog::{debug, info, o, warn, Drain, Logger};
 
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -29,7 +28,9 @@ async fn main() -> heim::Result<()> {
 
     // Query all system info at once, since heim is asynchronous...
     info!(log, "Probing host system characteristics...");
-    let cpu_frequency = heim::cpu::frequency();
+    let global_cpu_freq = heim::cpu::frequency();
+    #[cfg(target_os = "linux")]
+    let linux_cpu_freqs = heim::cpu::os::linux::frequencies();
     let disk_partitions = heim::disk::partitions();
     let logical_cpus = heim::cpu::logical_count();
     let memory = heim::memory::memory();
@@ -41,8 +42,8 @@ async fn main() -> heim::Result<()> {
     let user_connections = heim::host::users();
     let virt = heim::virt::detect().map(Ok);
     // TODO: Retrieve current process + initial processes info
-    let (cpu_frequency, logical_cpus, memory, physical_cpus, platform, swap, virt) = try_join!(
-        cpu_frequency,
+    let (global_cpu_freq, logical_cpus, memory, physical_cpus, platform, swap, virt) = try_join!(
+        global_cpu_freq,
         logical_cpus,
         memory,
         physical_cpus,
@@ -63,8 +64,8 @@ async fn main() -> heim::Result<()> {
     if let Some(virt) = virt {
         warn!(
             log,
-            "Detected underlying virtualization layers, make sure that they \
-             don't bias your benchmarks!";
+            "Found underlying virtualization layers, make sure that they don't \
+             bias your benchmarks!";
             "detected virtualization scheme" => ?virt
         );
     }
@@ -95,7 +96,7 @@ async fn main() -> heim::Result<()> {
         {
             use heim::host::os::linux::UserExt;
             debug!(user_log,
-                   "Got linux-specific connection details";
+                   "Got Linux-specific connection details";
                    "login process PID" => connection.pid(),
                    "(pseudo-)tty name" => connection.terminal(),
                    "terminal identifier" => connection.id(),
@@ -133,29 +134,68 @@ async fn main() -> heim::Result<()> {
         );
     }
 
-    // TODO: Finish work-in-progress slog port
-
     // CPU report
-    print!("- {} logical CPU(s)", logical_cpus);
-    if let Some(physical_cpus) = physical_cpus {
-        print!(", {} physical core(s)", physical_cpus);
-    } else {
-        print!(" physical core count is unknown");
+    info!(log, "Received CPU configuration information";
+          "architecture" => ?platform.architecture(),
+          "logical CPU count" => logical_cpus,
+          "physical CPU count" => physical_cpus);
+    //
+    let log_freq_range = |log: &Logger, title: &str, freq: &CpuFrequency| {
+        if let (Some(min), Some(max)) = (freq.min(), freq.max()) {
+            info!(log, "Found {} frequency range", title;
+                  "min frequency (MHz)" => min.get::<megahertz>(),
+                  "max frequency (MHz)" => max.get::<megahertz>());
+        } else {
+            warn!(log, "Some {} frequency range data is missing", title;
+                  "min frequency" => ?freq.min(),
+                  "max frequency" => ?freq.max());
+        }
+    };
+    let mut printing_detailed_freqs = false;
+    //
+    // For now, heim only provides per-CPU frequency information on Linux.
+    //
+    // On this OS, check if the per-CPU frequency ranges differ from the global
+    // frequency range. This can happen on some embedded architectures (e.g. ARM
+    // big.LITTLE), but should be rare on a typical benchmarking node.
+    //
+    // If it does happen, print the per-CPU freq range breakdown. Otherwise,
+    // stick with the cross-platform & concise global frequency range printout.
+    #[cfg(target_os = "linux")]
+    {
+        let global_freq_range = (global_cpu_freq.min(), global_cpu_freq.max());
+        let cpu_indices_and_freqs = linux_cpu_freqs.enumerate();
+        pin_mut!(cpu_indices_and_freqs);
+        debug!(log, "Running on Linux: Enumerating per-CPU frequency ranges...");
+        while let Some((idx, freq)) = cpu_indices_and_freqs.next().await {
+            let cpu_log = log.new(o!("logical cpu index" => idx));
+            let freq = freq?;
+            if printing_detailed_freqs {
+                log_freq_range(&cpu_log, "per-CPU", &freq);
+            } else if (freq.min(), freq.max()) != global_freq_range {
+                printing_detailed_freqs = true;
+                for old_idx in 0..idx {
+                    let old_cpu_log = log.new(o!("logical cpu index" => old_idx));
+                    log_freq_range(&old_cpu_log, "per-CPU", &global_cpu_freq);
+                }
+                log_freq_range(&cpu_log, "per-CPU", &freq);
+            }
+        }
+
+        if !printing_detailed_freqs {
+            debug!(
+                log,
+                "Per-CPU frequency ranges match global frequency range, no \
+                 need for a detailed breakdown!"
+            );
+        }
     }
-    print!(", architecture is {:?}", platform.architecture());
-    // FIXME: On linux, query per-CPU frequency range, and print it instead of
-    //        the global info if it varies between cores (rare, but can happen,
-    //        especially in embedded architectures).
-    print!(", frequency ");
-    if let (Some(min), Some(max)) = (cpu_frequency.min(), cpu_frequency.max()) {
-        println!(
-            "ranges from {} to {} MHz",
-            min.get::<megahertz>(),
-            max.get::<megahertz>()
-        );
-    } else {
-        println!("range is unknown");
+    //
+    if !printing_detailed_freqs {
+        log_freq_range(&log, "global CPU", &global_cpu_freq);
     }
+
+    // TODO: Finish work-in-progress slog port
 
     // Memory properties
     println!(
