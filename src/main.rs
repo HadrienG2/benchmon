@@ -10,6 +10,7 @@ use futures_util::{
 
 use heim::{
     cpu::CpuFrequency,
+    disk::Partition,
     host::{Arch, Pid, Platform, User},
     memory::{Memory, Swap},
     units::{
@@ -83,29 +84,10 @@ async fn main() -> heim::Result<()> {
     // Report memory configuration
     report_memory(&log, memory, swap);
 
-    // TODO: Finish work-in-progress slog port
-
     // Report filesystem mounts
-    println!("- Filesystem mount(s):");
-    pin_mut!(disk_partitions);
-    // TODO: Instead of displaying output of raw iteration, collect and sort by
-    //       mount point.
-    while let Some(partition) = disk_partitions.next().await {
-        let partition = partition?;
-        // FIXME: Replace Debug printout with controlled format
-        print!("    * {:?}, with ", partition);
-        match heim::disk::usage(partition.mount_point()).await {
-            Ok(usage) if usage.total() != Information::new::<byte>(0) => {
-                println!("a capacity of {}", format_information(usage.total()));
-            }
-            Ok(_) => {
-                println!("zero capacity (likely a pseudo-filesystem)");
-            }
-            Err(e) => {
-                println!("failing capacity check ({})", e);
-            }
-        }
-    }
+    report_filesystem(&log, disk_partitions).await?;
+
+    // TODO: Finish work-in-progress slog port
 
     // Report network interfaces
     println!("- Network interface(s):");
@@ -237,7 +219,7 @@ async fn report_users(
                 info!(user_log,
                       "Got user session details";
                       "session ID" => session_id,
-                      "login process PIDs" => ?login_pids);
+                      "login process PID(s)" => ?login_pids);
             }
         }
     }
@@ -342,6 +324,58 @@ fn report_memory(log: &Logger, memory: Memory, swap: Swap) {
             "swap usage" => format_information(swap.used())
         );
     }
+}
+
+// Report on the host's file system configuration
+async fn report_filesystem(log: &Logger, disk_partitions: impl Stream<Item=heim::Result<Partition>>) -> heim::Result<()> {
+    info!(log, "Enumerating filesystem mounts...");
+    pin_mut!(disk_partitions);
+    let mut dev_to_mounts = BTreeMap::<_, Vec<_>>::new();
+    while let Some(partition) = disk_partitions.next().await {
+        let partition = partition?;
+
+        // Query disk capacity, and also use disk usage (if query is successful)
+        // as a last-resort disambiguation key for mounts with identical device
+        // name & size (e.g. unrelated tmpfs mounts on Linux).
+        let usage = heim::disk::usage(partition.mount_point()).await;
+        let known_used_bytes = usage.as_ref()
+                                    .map(|usage| usage.used().get::<byte>())
+                                    .unwrap_or(0);
+        let capacity = usage.map(|usage| usage.total().clone());
+
+        // Need to eagerly format device stats as otherwise they can't be used
+        // as BTreeMap keys... which is kind of sad.
+        let formatted_device = if let Some(device) = partition.device() {
+            device.to_string_lossy().into_owned()
+        } else {
+            "none".to_owned()
+        };
+        let formatted_capacity = match capacity {
+            Ok(capacity) => format_information(capacity),
+            Err(err) => format!("Unavailable ({})", err),
+        };
+        let formatted_filesystem = partition.file_system().as_str().to_owned();
+
+        // Group moint points by sorted device name, then capacity, then
+        // filesystem, and finally our hidden used storage disambiguation key.
+        let mount_list =
+            dev_to_mounts.entry((formatted_device,
+                                 formatted_capacity,
+                                 formatted_filesystem,
+                                 known_used_bytes))
+                         .or_default();
+        mount_list.push(partition.mount_point().to_owned());
+    }
+
+    for ((device, capacity, file_system, _used_bytes), mount_point) in dev_to_mounts {
+        info!(log, "Found a mounted device";
+              "device name" => device,
+              "capacity" => capacity,
+              "file system" => file_system,
+              "mount point(s)" => ?mount_point);
+    }
+
+    Ok(())
 }
 
 /// Pretty-print a quantity of information from heim
