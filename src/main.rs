@@ -11,6 +11,7 @@ use futures_util::{
 use heim::{
     cpu::CpuFrequency,
     host::{Arch, Pid, Platform, User},
+    memory::{Memory, Swap},
     units::{
         frequency::megahertz,
         information::{byte, gigabyte, kilobyte, megabyte, terabyte},
@@ -60,15 +61,15 @@ async fn main() -> heim::Result<()> {
         virt
     )?;
 
-    // Report on operating system and use of virtualization
+    // Report operating system and use of virtualization
     // (CPU architecture doesn't really belong here and will be displayed later)
     let cpu_arch = platform.architecture();
     report_os(&log, platform, virt);
 
-    // Report on open user sessions
+    // Report open user sessions
     report_users(&log, user_connections).await?;
 
-    // Report on CPU configuration
+    // Report CPU configuration
     report_cpus(
         &log,
         cpu_arch,
@@ -79,23 +80,12 @@ async fn main() -> heim::Result<()> {
     )
     .await?;
 
+    // Report memory configuration
+    report_memory(&log, memory, swap);
+
     // TODO: Finish work-in-progress slog port
 
-    // Memory properties
-    println!(
-        "- {} of RAM, {} of swap",
-        format_information(memory.total()),
-        format_information(swap.total())
-    );
-    if swap.used() > swap.total() / 10 {
-        print!(
-            "WARNING: Non-negligible use of swap ({}) detected, make sure \
-                         that it doesn't bias your benchmark!",
-            format_information(swap.used())
-        );
-    }
-
-    // Filesystem mounts
+    // Report filesystem mounts
     println!("- Filesystem mount(s):");
     pin_mut!(disk_partitions);
     // TODO: Instead of displaying output of raw iteration, collect and sort by
@@ -117,7 +107,7 @@ async fn main() -> heim::Result<()> {
         }
     }
 
-    // Network interfaces
+    // Report network interfaces
     println!("- Network interface(s):");
     pin_mut!(network_interfaces);
     while let Some(nic) = network_interfaces.next().await {
@@ -126,7 +116,7 @@ async fn main() -> heim::Result<()> {
         println!("    * {:?}", nic?);
     }
 
-    // Temperature sensors
+    // Report temperature sensors
     println!("- Temperature sensor(s):");
     pin_mut!(temperatures);
     while let Some(sensor) = temperatures.next().await {
@@ -178,6 +168,7 @@ fn report_os(log: &Logger, platform: Platform, virt: Option<Virtualization>) {
         "OS release" => platform.release(),
         "OS version" => platform.version()
     );
+
     if let Some(virt) = virt {
         warn!(
             log,
@@ -325,7 +316,7 @@ async fn report_cpus(
             debug!(
                 log,
                 "Per-CPU frequency ranges match global frequency range, no \
-                 need for a detailed breakdown!"
+                 need for a detailed breakdown"
             );
         }
     }
@@ -335,6 +326,22 @@ async fn report_cpus(
     }
 
     Ok(())
+}
+
+// Report on the host's memory configuration
+fn report_memory(log: &Logger, memory: Memory, swap: Swap) {
+    info!(log, "Received memory configuration information";
+          "RAM size" => format_information(memory.total()),
+          "swap size" => format_information(swap.total()));
+
+    if swap.used() > swap.total() / 10 {
+        warn!(
+            log,
+            "Non-negligible use of swap detected, make sure that it doesn't
+             bias your benchmark!";
+            "swap usage" => format_information(swap.used())
+        );
+    }
 }
 
 /// Pretty-print a quantity of information from heim
