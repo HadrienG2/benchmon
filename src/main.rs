@@ -80,9 +80,8 @@ async fn main() -> heim::Result<()> {
     // Report filesystem mounts
     report_filesystem(&log, disk_partitions).await?;
 
-    // TODO: Finish work-in-progress slog port
-
     // Report network interfaces
+    // TODO: Finish work-in-progress slog port
     println!("- Network interface(s):");
     pin_mut!(network_interfaces);
     while let Some(nic) = network_interfaces.next().await {
