@@ -62,18 +62,10 @@ async fn main() -> heim::Result<()> {
         virt
     )?;
 
-    // Report operating system and use of virtualization
-    // (CPU architecture doesn't really belong here and will be displayed later)
-    let cpu_arch = platform.architecture();
-    report_os(&log, platform, virt);
-
-    // Report open user sessions
-    report_users(&log, user_connections).await?;
-
     // Report CPU configuration
     report_cpus(
         &log,
-        cpu_arch,
+        platform.architecture(),
         logical_cpus,
         physical_cpus,
         global_cpu_freq,
@@ -124,6 +116,12 @@ async fn main() -> heim::Result<()> {
         }
         println!(")");
     }
+
+    // Report operating system and use of virtualization
+    report_os(&log, platform, virt);
+
+    // Report open user sessions
+    report_users(&log, user_connections).await?;
 
     // TODO: Extract this system summary to a separate async fn, then start
     //       polling useful "dynamic" quantities in a system monitor like
