@@ -35,15 +35,10 @@ async fn main() -> heim::Result<()> {
     // Query all system info at once, leveraging heim's asynchronous nature...
     info!(log, "Probing host system characteristics...");
     let global_cpu_freq = heim::cpu::frequency();
-    let per_cpu_freqs;
     #[cfg(target_os = "linux")]
-    {
-        per_cpu_freqs = Some(heim::cpu::os::linux::frequencies());
-    }
+    let per_cpu_freqs = Some(heim::cpu::os::linux::frequencies());
     #[cfg(not(target_os = "linux"))]
-    {
-        per_cpu_freqs = None;
-    }
+    let per_cpu_freqs = None;
     let disk_partitions = heim::disk::partitions();
     let logical_cpus = heim::cpu::logical_count();
     let memory = heim::memory::memory();
