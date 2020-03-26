@@ -13,6 +13,7 @@ use heim::{
     disk::Partition,
     host::{Arch, Pid, Platform, User},
     memory::{Memory, Swap},
+    net::{Address, MacAddr, Nic},
     sensors::TemperatureSensor,
     units::{
         frequency::megahertz,
@@ -25,7 +26,11 @@ use heim::{
 
 use slog::{debug, info, o, warn, Drain, Logger};
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Mutex,
+};
 
 #[async_std::main]
 async fn main() -> heim::Result<()> {
@@ -81,14 +86,7 @@ async fn main() -> heim::Result<()> {
     report_filesystem(&log, disk_partitions).await?;
 
     // Report network interfaces
-    // TODO: Finish work-in-progress slog port
-    println!("- Network interface(s):");
-    pin_mut!(network_interfaces);
-    while let Some(nic) = network_interfaces.next().await {
-        // TODO: Group by name and sort alphabetically using a BTreeMap
-        // FIXME: Replace Debug printout with controlled format
-        println!("    * {:?}", nic?);
-    }
+    report_network(&log, network_interfaces).await?;
 
     // Report temperature sensors
     report_temp_sensors(&log, temperatures).await?;
@@ -267,6 +265,333 @@ async fn report_filesystem(
     Ok(())
 }
 
+async fn report_network(
+    log: &Logger,
+    network_interfaces: impl Stream<Item = heim::Result<Nic>>,
+) -> heim::Result<()> {
+    // TODO: Consider exposing the data later on
+
+    // Address of whatever the interface is plugged into
+    #[derive(Debug, Eq, PartialEq)]
+    enum TargetAddress<AddressType> {
+        /// Broadcast address
+        Broadcast(AddressType),
+
+        /// Point-to-point destination address
+        PointToPoint(AddressType),
+    }
+
+    // Address-specific properties
+    #[derive(Debug, Eq, PartialEq)]
+    struct AddressProperties<AddressType> {
+        /// Address of a network interface
+        address: AddressType,
+
+        /// Associated subnet mask (if any)
+        netmask: Option<AddressType>,
+
+        /// Associated broadcast or destination address (if any)
+        target: Option<TargetAddress<AddressType>>,
+    }
+
+    // Interface-wide stats (according to ifconfig)
+    #[derive(Debug, Default)]
+    struct InterfaceProperties {
+        // These flags are available everywhere
+        is_up: bool,
+        is_loopback: bool,
+        is_multicast: bool,
+
+        // These flags are only available on some operating systems
+        is_broadcast: Option<bool>,
+        is_point_to_point: Option<bool>,
+
+        // A network interface should only have one link-layer address, which
+        // may or may not be reported by the underlying system API.
+        link_address: Option<AddressProperties<MacAddr>>,
+
+        // A network interface may have multiple network-layer addresses
+        ipv4_addresses: Vec<AddressProperties<Ipv4Addr>>,
+        ipv6_addresses: Vec<AddressProperties<Ipv6Addr>>,
+    }
+
+    info!(log, "Enumerating network interfaces...");
+    pin_mut!(network_interfaces);
+    let mut name_to_properties = BTreeMap::<String, InterfaceProperties>::new();
+    while let Some(interface) = network_interfaces.next().await {
+        let interface = interface?;
+
+        // Create interface record or check its consistency
+        let name = interface.name().to_owned();
+        let interface_properties = match name_to_properties.entry(name) {
+            // Create interface record if it doesn't exist
+            Entry::Vacant(entry) => {
+                let properties = entry.insert(InterfaceProperties {
+                    is_up: interface.is_up(),
+                    is_loopback: interface.is_loopback(),
+                    is_multicast: interface.is_multicast(),
+                    is_broadcast: None,
+                    is_point_to_point: None,
+                    link_address: None,
+                    ipv4_addresses: Vec::new(),
+                    ipv6_addresses: Vec::new(),
+                });
+                #[cfg(target_os = "linux")]
+                {
+                    use heim::net::os::linux::NicExt;
+                    assert!(
+                        !(interface.is_broadcast() && interface.is_point_to_point()),
+                        "A network interface should not be able to operate in \
+                         broadcast and point-to-point mode simultaneously"
+                    );
+                    properties.is_broadcast = Some(interface.is_broadcast());
+                    properties.is_point_to_point = Some(interface.is_point_to_point());
+                }
+                properties
+            }
+            // Check consistency of existing interface record flags
+            Entry::Occupied(prop_entry) => {
+                let properties = prop_entry.into_mut();
+                const INCONSISTENT_STATUS_ERROR: &str =
+                    "Reported network interface status flags are inconsistent";
+                assert_eq!(
+                    properties.is_up,
+                    interface.is_up(),
+                    "{}",
+                    INCONSISTENT_STATUS_ERROR
+                );
+                assert_eq!(
+                    properties.is_loopback,
+                    interface.is_loopback(),
+                    "{}",
+                    INCONSISTENT_STATUS_ERROR
+                );
+                assert_eq!(
+                    properties.is_multicast,
+                    interface.is_multicast(),
+                    "{}",
+                    INCONSISTENT_STATUS_ERROR
+                );
+                #[cfg(target_os = "linux")]
+                {
+                    use heim::net::os::linux::NicExt;
+                    assert_eq!(
+                        properties.is_broadcast,
+                        Some(interface.is_broadcast()),
+                        "{}",
+                        INCONSISTENT_STATUS_ERROR
+                    );
+                    assert_eq!(
+                        properties.is_point_to_point,
+                        Some(interface.is_point_to_point()),
+                        "{}",
+                        INCONSISTENT_STATUS_ERROR
+                    );
+                }
+                properties
+            }
+        };
+
+        // Helper function to deduplicate interface address enumeration code
+        fn build_address_properties<AddressType>(
+            interface: Nic,
+            address: AddressType,
+            mut unwrap_address: impl FnMut(Address) -> AddressType,
+        ) -> AddressProperties<AddressType> {
+            // Assert that netmask (if any) uses same address format
+            let netmask = interface.netmask().map(&mut unwrap_address);
+
+            // Assert that destination (if any) uses same address format and
+            // take note of the fact that this is a point-to-point concept
+            let mut target = interface
+                .destination()
+                .map(&mut unwrap_address)
+                .map(TargetAddress::PointToPoint);
+
+            // If on linux...
+            #[cfg(target_os = "linux")]
+            {
+                use heim::net::os::linux::NicExt;
+                
+                // Check broadcast address
+                let broadcast = interface.broadcast();
+
+                // If a destination is set...
+                if target.is_some() {
+                    // Make sure we're in point-to-point mode
+                    assert!(
+                        interface.is_point_to_point(),
+                        "Network interface claims not to operate in \
+                         point-to-point mode, but has a destination address"
+                    );
+                    // Make sure no broadcast address is set
+                    assert_eq!(
+                        broadcast, None,
+                        "Network interface claims to operate in \
+                         point-to-point mode, but has a broadcast address."
+                    );
+                } else if broadcast.is_some() {
+                    // If a broadcast is set, make sure we're in broadcast mode
+                    assert!(
+                        interface.is_broadcast(),
+                        "Network interface claims not to operate in \
+                         broadcast mode, but has a broadcast address"
+                    );
+                    target = broadcast.map(unwrap_address).map(TargetAddress::Broadcast);
+                }
+            }
+
+            // Emit pre-digested address properties
+            AddressProperties {
+                address,
+                netmask,
+                target,
+            }
+        }
+
+        match interface.address() {
+            // Process interface link address (should be unique)
+            Address::Link(mac_address) => {
+                assert_eq!(
+                    interface_properties.link_address, None,
+                    "A network interface should only have one link address"
+                );
+                let unwrap_link_address = |address: Address| -> MacAddr {
+                    if let Address::Link(mac_addr) = address {
+                        mac_addr
+                    } else {
+                        unreachable!("Expected a link-layer address")
+                    }
+                };
+                interface_properties.link_address = Some(build_address_properties(
+                    interface,
+                    mac_address,
+                    unwrap_link_address,
+                ));
+            }
+
+            // Process IPv4 interface address
+            Address::Inet(SocketAddr::V4(ipv4_sock_addr)) => {
+                assert_eq!(ipv4_sock_addr.port(), 0, "Expected an IP address");
+                let unwrap_ipv4_address = |address: Address| -> Ipv4Addr {
+                    if let Address::Inet(SocketAddr::V4(ipv4_sock_addr)) = address {
+                        assert_eq!(ipv4_sock_addr.port(), 0, "Expected an IP address");
+                        *ipv4_sock_addr.ip()
+                    } else {
+                        unreachable!("Expected an IPv4 address")
+                    }
+                };
+                interface_properties
+                    .ipv4_addresses
+                    .push(build_address_properties(
+                        interface,
+                        *ipv4_sock_addr.ip(),
+                        unwrap_ipv4_address,
+                    ));
+            }
+
+            // Process IPv6 interface address
+            //
+            // FIXME: Put Inet(V6) version back in the unreachable match arm
+            //        once heim resolves the bug that lets this case happen.
+            Address::Inet(SocketAddr::V6(ipv6_sock_addr))
+            | Address::Inet6(SocketAddr::V6(ipv6_sock_addr)) => {
+                assert_eq!(
+                    ipv6_sock_addr.port(),
+                    0,
+                    "Expected an internet-layer address"
+                );
+                let unwrap_ipv6_address = |address: Address| -> Ipv6Addr {
+                    // FIXME: See above
+                    if let Address::Inet(SocketAddr::V6(ipv6_sock_addr))
+                    | Address::Inet6(SocketAddr::V6(ipv6_sock_addr)) = address
+                    {
+                        assert_eq!(ipv6_sock_addr.port(), 0, "Expected an IP address");
+                        *ipv6_sock_addr.ip()
+                    } else {
+                        unreachable!("Expected an IPv6 address")
+                    }
+                };
+                interface_properties
+                    .ipv6_addresses
+                    .push(build_address_properties(
+                        interface,
+                        *ipv6_sock_addr.ip(),
+                        unwrap_ipv6_address,
+                    ));
+            }
+
+            // These combinations don't make sense, the heim API probably
+            // shouldn't allow them to occur.
+            Address::Inet6(SocketAddr::V4(_)) => unreachable!(
+                "Received IP address with an inconsistent type {:?}",
+                interface.address()
+            ),
+
+            // Can't use an exhaustive match, per heim design choice
+            _ => panic!("Unsupported network interface address type"),
+        }
+    }
+
+    // Now it's time to report on the interfaces that we observed
+    for (name, interface) in name_to_properties {
+        let nic_log = log.new(o!("interface name" => name));
+
+        // Report status flags
+        info!(nic_log, "Found a network interface";
+              "up" => interface.is_up,
+              "loopback" => interface.is_loopback,
+              "multicast" => interface.is_multicast,
+              "broadcast" => interface.is_broadcast,
+              "point-to-point" => interface.is_point_to_point);
+
+        // Report link address, if any
+        if let Some(link_address_props) = interface.link_address {
+            assert_eq!(
+                link_address_props.netmask, None,
+                "Link-layer addresses shouldn't have subnet masks"
+            );
+            let formatted_broadcast = match link_address_props.target {
+                Some(TargetAddress::Broadcast(addr)) => format!("{}", addr),
+                None => "None".to_owned(),
+                Some(TargetAddress::PointToPoint(_addr)) => {
+                    unreachable!(
+                        "Point-to-point links shouldn't have a destination \
+                         address"
+                    );
+                }
+            };
+            info!(nic_log, "Got a link-layer address";
+                  "address" => %link_address_props.address,
+                  "broadcast address" => formatted_broadcast);
+        }
+
+        // Report IPv4 addresses
+        for ipv4_address_props in interface.ipv4_addresses {
+            let netmask = ipv4_address_props
+                .netmask
+                .expect("IP addresses should have a subnet mask");
+            info!(nic_log, "Got an IPv4 address";
+                  "address" => ?ipv4_address_props.address,
+                  "netmask" => ?netmask,
+                  "target" => ?ipv4_address_props.target);
+        }
+
+        // Report IPv6 addresses
+        for ipv6_address_props in interface.ipv6_addresses {
+            let netmask = ipv6_address_props
+                .netmask
+                .expect("IP addresses should have a subnet mask");
+            info!(nic_log, "Got an IPv6 address";
+                  "address" => ?ipv6_address_props.address,
+                  "netmask" => ?netmask,
+                  "target" => ?ipv6_address_props.target);
+        }
+    }
+
+    Ok(())
+}
+
 /// Report on the host's temperature sensors
 async fn report_temp_sensors(
     log: &Logger,
@@ -278,7 +603,7 @@ async fn report_temp_sensors(
         high_trip_point: Option<Temperature>,
         critical_trip_point: Option<Temperature>,
     }
-    let mut unit_to_sensors = BTreeMap::<_, Vec<_>>::new();
+    let mut unit_to_sensors = BTreeMap::<String, Vec<_>>::new();
 
     info!(log, "Enumerating temperature sensors...");
     pin_mut!(temperatures);
@@ -344,7 +669,7 @@ async fn report_users(
         /// (This data is, for now, only available on Linux)
         sessions_to_pids: Option<BTreeMap<SessionId, Vec<Pid>>>,
     };
-    let mut usernames_to_stats = BTreeMap::<_, UserStats>::new();
+    let mut usernames_to_stats = BTreeMap::<String, UserStats>::new();
 
     info!(log, "Enumerating user connections...");
     pin_mut!(user_connections);
