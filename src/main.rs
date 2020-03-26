@@ -710,7 +710,7 @@ async fn report_users(
             for (session_id, login_pids) in sessions_to_pids {
                 login_pids.sort();
                 info!(user_log,
-                      "Got user session details";
+                      "Got details of a user session";
                       "session ID" => session_id,
                       "login process PID(s)" => ?login_pids);
             }
