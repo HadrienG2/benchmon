@@ -1,16 +1,11 @@
 // FIXME: I probably need to have a word with the heim dev about this
-#![type_length_limit = "40000000"]
+#![type_length_limit = "20000000"]
 
-use futures_util::{
-    future::FutureExt,
-    pin_mut,
-    stream::{Stream, StreamExt},
-    try_join,
-};
+use futures_util::{future::TryFutureExt, stream::TryStreamExt, try_join};
 
 use heim::{
     cpu::CpuFrequency,
-    disk::Partition,
+    disk::{Partition, Usage},
     host::{Arch, Pid, Platform, User},
     memory::{Memory, Swap},
     net::{Address, MacAddr, Nic},
@@ -40,35 +35,51 @@ async fn main() -> heim::Result<()> {
     let drain = Mutex::new(drain).fuse();
     let log = slog::Logger::root(drain, o!("benchmon version" => env!("CARGO_PKG_VERSION")));
 
-    // Query all system info at once, leveraging heim's asynchronous nature...
+    // Ask heim to start fetching all the system info we need...
     info!(log, "Probing host system characteristics...");
+    // - CPU info
     let global_cpu_freq = heim::cpu::frequency();
     #[cfg(target_os = "linux")]
-    let per_cpu_freqs = Some(heim::cpu::os::linux::frequencies());
+    let per_cpu_freqs = heim::cpu::os::linux::frequencies()
+        .try_collect::<Vec<_>>()
+        .map_ok(Some);
     #[cfg(not(target_os = "linux"))]
-    let per_cpu_freqs = None;
-    let disk_partitions = heim::disk::partitions();
+    let per_cpu_freqs = futures_util::future::ok(None);
     let logical_cpus = heim::cpu::logical_count();
-    let memory = heim::memory::memory();
-    let network_interfaces = heim::net::nic();
     let physical_cpus = heim::cpu::physical_count();
-    let platform = heim::host::platform();
+    // - Memory info
+    let memory = heim::memory::memory();
     let swap = heim::memory::swap();
-    let temperatures = heim::sensors::temperatures();
-    let user_connections = heim::host::users();
-    let virt = heim::virt::detect().map(Ok);
+    // - Filesystem info
+    let disk_partitions_and_usage = heim::disk::partitions()
+        .and_then(|partition| async {
+            // NOTE: Failure to stat a partition is purposely treated as a
+            //       non-fatal event, as it can happen on some random
+            //       pseudo-filesystem that no one cares about.
+            let usage_result = heim::disk::usage(partition.mount_point()).await;
+            Ok((partition, usage_result))
+        })
+        .try_collect::<Vec<_>>();
+    // - Network info
+    let network_interfaces = heim::net::nic().try_collect::<Vec<_>>();
+    // - Sensor info
+    let temperatures = heim::sensors::temperatures().try_collect::<Vec<_>>();
+    // - Platform info (= OS info + CPU architecture)
+    let platform = heim::host::platform();
+    // - User connexion info
+    let user_connections = heim::host::users().try_collect::<Vec<_>>();
+    // - Virtualization info
+    let virt = heim::virt::detect();
     // TODO: Retrieve current process + initial processes info
-    let (global_cpu_freq, logical_cpus, memory, physical_cpus, platform, swap, virt) = try_join!(
-        global_cpu_freq,
-        logical_cpus,
-        memory,
-        physical_cpus,
-        platform,
-        swap,
-        virt
-    )?;
 
     // Report CPU configuration
+    let (platform, logical_cpus, physical_cpus, global_cpu_freq, per_cpu_freqs) = try_join!(
+        platform,
+        logical_cpus,
+        physical_cpus,
+        global_cpu_freq,
+        per_cpu_freqs
+    )?;
     report_cpus(
         &log,
         platform.architecture(),
@@ -76,26 +87,31 @@ async fn main() -> heim::Result<()> {
         physical_cpus,
         global_cpu_freq,
         per_cpu_freqs,
-    )
-    .await?;
+    );
 
     // Report memory configuration
+    let (memory, swap) = try_join!(memory, swap)?;
     report_memory(&log, memory, swap);
 
-    // Report filesystem mounts
-    report_filesystem(&log, disk_partitions).await?;
+    // Report filesystem configuration
+    let disk_partitions_and_usage = disk_partitions_and_usage.await?;
+    report_filesystem(&log, disk_partitions_and_usage);
 
-    // Report network interfaces
-    report_network(&log, network_interfaces).await?;
+    // Report network configuration
+    let network_interfaces = network_interfaces.await?;
+    report_network(&log, network_interfaces);
 
-    // Report temperature sensors
-    report_temp_sensors(&log, temperatures).await?;
+    // Report temperature sensor configuration
+    let temperatures = temperatures.await?;
+    report_temp_sensors(&log, temperatures);
 
     // Report operating system and use of virtualization
+    let virt = virt.await;
     report_os(&log, platform, virt);
 
     // Report open user sessions
-    report_users(&log, user_connections).await?;
+    let user_connections = user_connections.await?;
+    report_users(&log, user_connections);
 
     // TODO: Report on processes, highlighting this one and maybe trying to
     //       trace each down to a user login process or PID 1 too.
@@ -116,14 +132,14 @@ async fn main() -> heim::Result<()> {
 }
 
 /// Report on the host's CPU configuration
-async fn report_cpus(
+fn report_cpus(
     log: &Logger,
     cpu_arch: Arch,
     logical_cpus: u64,
     physical_cpus: Option<u64>,
     global_cpu_freq: CpuFrequency,
-    per_cpu_freqs: Option<impl Stream<Item = heim::Result<CpuFrequency>>>,
-) -> heim::Result<()> {
+    per_cpu_freqs: Option<Vec<CpuFrequency>>,
+) {
     info!(log, "Received CPU configuration information";
           "architecture" => ?cpu_arch,
           "logical CPU count" => logical_cpus,
@@ -153,15 +169,10 @@ async fn report_cpus(
     let mut printing_detailed_freqs = false;
     if let Some(per_cpu_freqs) = per_cpu_freqs {
         let global_freq_range = (global_cpu_freq.min(), global_cpu_freq.max());
-        let cpu_indices_and_freqs = per_cpu_freqs.enumerate();
-        debug!(
-            log,
-            "Per-CPU frequency ranges are available, enumerating them..."
-        );
-        pin_mut!(cpu_indices_and_freqs);
-        while let Some((idx, freq)) = cpu_indices_and_freqs.next().await {
+        debug!(log, "Got per-CPU frequency ranges, processing them...");
+
+        for (idx, freq) in per_cpu_freqs.into_iter().enumerate() {
             let cpu_log = log.new(o!("logical cpu index" => idx));
-            let freq = freq?;
             if printing_detailed_freqs {
                 log_freq_range(&cpu_log, "per-CPU", &freq);
             } else if (freq.min(), freq.max()) != global_freq_range {
@@ -186,8 +197,6 @@ async fn report_cpus(
     if !printing_detailed_freqs {
         log_freq_range(&log, "global CPU", &global_cpu_freq);
     }
-
-    Ok(())
 }
 
 // Report on the host's memory configuration
@@ -207,20 +216,16 @@ fn report_memory(log: &Logger, memory: Memory, swap: Swap) {
 }
 
 // Report on the host's file system configuration
-async fn report_filesystem(
+fn report_filesystem(
     log: &Logger,
-    disk_partitions: impl Stream<Item = heim::Result<Partition>>,
-) -> heim::Result<()> {
-    info!(log, "Enumerating filesystem mounts...");
-    pin_mut!(disk_partitions);
+    disk_partitions_and_usage: Vec<(Partition, heim::Result<Usage>)>,
+) {
+    debug!(log, "Processing filesystem mount list...");
     let mut dev_to_mounts = BTreeMap::<_, Vec<_>>::new();
-    while let Some(partition) = disk_partitions.next().await {
-        let partition = partition?;
-
-        // Query disk capacity, and also use disk usage (if query is successful)
-        // as a last-resort disambiguation key for mounts with identical device
-        // name & size (e.g. unrelated tmpfs mounts on Linux).
-        let usage = heim::disk::usage(partition.mount_point()).await;
+    for (partition, usage) in disk_partitions_and_usage {
+        // Use disk capacity and disk usage (if available) as a last-resort
+        // disambiguation key for mounts with identical device name and size
+        // (e.g. unrelated tmpfs mounts on Linux).
         let known_used_bytes = usage
             .as_ref()
             .map(|usage| usage.used().get::<byte>())
@@ -261,14 +266,10 @@ async fn report_filesystem(
               "file system" => file_system,
               "mount point(s)" => ?mount_list);
     }
-
-    Ok(())
 }
 
-async fn report_network(
-    log: &Logger,
-    network_interfaces: impl Stream<Item = heim::Result<Nic>>,
-) -> heim::Result<()> {
+fn report_network(log: &Logger, network_interfaces: Vec<Nic>) {
+    // TODO: Break this down in multiple functions during modularization
     // TODO: Consider exposing the data later on
 
     // Address of whatever the interface is plugged into
@@ -315,12 +316,9 @@ async fn report_network(
         ipv6_addresses: Vec<AddressProperties<Ipv6Addr>>,
     }
 
-    info!(log, "Enumerating network interfaces...");
-    pin_mut!(network_interfaces);
+    debug!(log, "Processing network interface list...");
     let mut name_to_properties = BTreeMap::<String, InterfaceProperties>::new();
-    while let Some(interface) = network_interfaces.next().await {
-        let interface = interface?;
-
+    for interface in network_interfaces {
         // Create interface record or check its consistency
         let name = interface.name().to_owned();
         let interface_properties = match name_to_properties.entry(name) {
@@ -412,7 +410,7 @@ async fn report_network(
             #[cfg(target_os = "linux")]
             {
                 use heim::net::os::linux::NicExt;
-                
+
                 // Check broadcast address
                 let broadcast = interface.broadcast();
 
@@ -588,15 +586,10 @@ async fn report_network(
                   "target" => ?ipv6_address_props.target);
         }
     }
-
-    Ok(())
 }
 
 /// Report on the host's temperature sensors
-async fn report_temp_sensors(
-    log: &Logger,
-    temperatures: impl Stream<Item = heim::Result<TemperatureSensor>>,
-) -> heim::Result<()> {
+fn report_temp_sensors(log: &Logger, temperatures: Vec<TemperatureSensor>) {
     // TODO: Consider exposing this later on
     struct SensorProperties {
         label: Option<String>,
@@ -605,10 +598,8 @@ async fn report_temp_sensors(
     }
     let mut unit_to_sensors = BTreeMap::<String, Vec<_>>::new();
 
-    info!(log, "Enumerating temperature sensors...");
-    pin_mut!(temperatures);
-    while let Some(sensor) = temperatures.next().await {
-        let sensor = sensor?;
+    debug!(log, "Processing temperature sensor list...");
+    for sensor in temperatures {
         let sensor_list = unit_to_sensors.entry(sensor.unit().to_owned()).or_default();
         sensor_list.push(SensorProperties {
             label: sensor.label().map(|label| label.to_owned()),
@@ -628,8 +619,6 @@ async fn report_temp_sensors(
                   "critical trip point (°C)" => to_celsius(sensor.critical_trip_point));
         }
     }
-
-    Ok(())
 }
 
 /// Report on the host's operating system and use of virtualization
@@ -654,10 +643,7 @@ fn report_os(log: &Logger, platform: Platform, virt: Option<Virtualization>) {
 }
 
 /// Report on the host's open user sessions
-async fn report_users(
-    log: &Logger,
-    user_connections: impl Stream<Item = heim::Result<User>>,
-) -> heim::Result<()> {
+fn report_users(log: &Logger, user_connections: Vec<User>) {
     // TODO: Consider returning some of this for future use
     type SessionId = i32; // FIXME: Make heim expose this
     #[derive(Default)]
@@ -671,10 +657,8 @@ async fn report_users(
     };
     let mut usernames_to_stats = BTreeMap::<String, UserStats>::new();
 
-    info!(log, "Enumerating user connections...");
-    pin_mut!(user_connections);
-    while let Some(connection) = user_connections.next().await {
-        let connection = connection?;
+    debug!(log, "Processing user connection list...");
+    for connection in user_connections {
         let username = connection.username().to_owned();
         let user_log = log.new(o!("username" => username.clone()));
         debug!(user_log, "Found a new user connection");
@@ -724,8 +708,6 @@ async fn report_users(
              system quiet while your benchmarks are running!"
         );
     }
-
-    Ok(())
 }
 
 /// Pretty-print a quantity of information from heim
