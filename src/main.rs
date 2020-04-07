@@ -1,7 +1,11 @@
 // FIXME: I probably need to have a word with the heim dev about this
 #![type_length_limit = "20000000"]
 
-use futures_util::{future::TryFutureExt, stream::TryStreamExt, try_join};
+use futures_util::{
+    future::TryFutureExt,
+    stream::{StreamExt, TryStreamExt},
+    try_join
+};
 
 use heim::{
     cpu::CpuFrequency,
@@ -9,6 +13,7 @@ use heim::{
     host::{Arch, Pid, Platform, User},
     memory::{Memory, Swap},
     net::{Address, MacAddr, Nic},
+    process::ProcessError,
     sensors::TemperatureSensor,
     units::{
         frequency::megahertz,
@@ -19,7 +24,7 @@ use heim::{
     virt::Virtualization,
 };
 
-use slog::{debug, info, o, warn, Drain, Logger};
+use slog::{debug, error, info, o, warn, Drain, Logger};
 
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -70,7 +75,8 @@ async fn main() -> heim::Result<()> {
     let user_connections = heim::host::users().try_collect::<Vec<_>>();
     // - Virtualization info
     let virt = heim::virt::detect();
-    // TODO: Retrieve current process + initial processes info
+    // - Initial processes info
+    let processes_results = heim::process::processes().collect::<Vec<_>>();
 
     // Report CPU configuration
     let (platform, logical_cpus, physical_cpus, global_cpu_freq, per_cpu_freqs) = try_join!(
@@ -115,6 +121,47 @@ async fn main() -> heim::Result<()> {
 
     // TODO: Report on processes, highlighting this one and maybe trying to
     //       trace each down to a user login process or PID 1 too.
+    let my_pid = std::process::id() as i32;
+    let processes_results = processes_results.await;
+    for process_result in processes_results {
+        match process_result {
+            Ok(process) => {
+                let process_log = log.new(o!("pid" => process.pid()));
+                info!(process_log, "Found a process";
+                      // TODO: Build a process tree instead of just printing
+                      //       parent PID right away.
+                      // FIXME: Go beyond debug repr, ideally try to aggregate
+                      //        some errors like nonexistent or zombie too.
+                      // TODO: Translate faulty ZombieProcess error from cwd()
+                      //       into the AccessError that it usually is.
+                      "parent pid" => ?process.parent_pid().await,
+                      "name" => ?process.name().await,
+                      "executable path" => ?process.exe().await,
+                      "command line" => ?process.command().await,
+                      "working directory" => ?process.cwd().await,
+                      "status" => ?process.status().await,
+                      "creation time" => ?process.create_time().await,
+                      "running" => ?process.is_running().await);
+                if process.pid() == my_pid {
+                    debug!(process_log, "It's-a Me!");
+                }
+            }
+            Err(ProcessError::NoSuchProcess(pid)) => {
+                debug!(log, "Found a process, but it seems to have vanished";
+                       "pid" => pid)
+            }
+            Err(ProcessError::ZombieProcess(pid)) => {
+                warn!(log, "Found a zombie process";
+                      "pid" => pid)
+            }
+            Err(ProcessError::AccessDenied(pid)) => {
+                error!(log, "Found a process that I'm not allowed to query";
+                       "pid" => pid)
+            }
+            Err(ProcessError::Load(err)) => Err(err)?,
+            _ => unimplemented!("Unsupported process query error")
+        }
+    }
 
     // TODO: Extract this system summary to a separate async fn, then start
     //       polling useful "dynamic" quantities in a system monitor like
