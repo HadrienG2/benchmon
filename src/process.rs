@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 
 use heim::{
     process::{Command, Pid, Process, ProcessError},
@@ -308,7 +308,7 @@ pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, Process
                         let nsecs = create_time.get::<nanosecond>() - 1_000_000_000.0 * secs;
                         let duration = Duration::new(secs as u64, nsecs as u32);
                         let system_time = SystemTime::UNIX_EPOCH + duration;
-                        let date_time = DateTime::<Utc>::from(system_time);
+                        let date_time = DateTime::<Local>::from(system_time);
                         format!("{}", date_time).into()
                     }
                     Err(err) => print_err(err),
