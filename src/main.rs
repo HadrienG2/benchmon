@@ -28,7 +28,7 @@ use heim::{
 use slog::{debug, info, o, warn, Drain, Logger};
 
 use std::{
-    collections::{btree_map, BTreeMap},
+    collections::{btree_map::Entry, BTreeMap},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Mutex,
 };
@@ -333,7 +333,7 @@ fn report_network(log: &Logger, network_interfaces: Vec<Nic>) {
         let name = interface.name().to_owned();
         let interface_properties = match name_to_properties.entry(name) {
             // Create interface record if it doesn't exist
-            btree_map::Entry::Vacant(entry) => {
+            Entry::Vacant(entry) => {
                 let properties = entry.insert(InterfaceProperties {
                     is_up: interface.is_up(),
                     is_loopback: interface.is_loopback(),
@@ -358,7 +358,7 @@ fn report_network(log: &Logger, network_interfaces: Vec<Nic>) {
                 properties
             }
             // Check consistency of existing interface record flags
-            btree_map::Entry::Occupied(prop_entry) => {
+            Entry::Occupied(prop_entry) => {
                 let properties = prop_entry.into_mut();
                 const INCONSISTENT_STATUS_ERROR: &str =
                     "Reported network interface status flags are inconsistent";
