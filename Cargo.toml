@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 async-std = { version = "1.5", features = [ "attributes" ] }
+chrono = { version = "0.4", default-features = false }
 futures-util = "0.3"
 heim = { version = "0.1.0-alpha", features = [ "cpu",
                                                "disk",

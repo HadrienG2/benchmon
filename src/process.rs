@@ -1,16 +1,23 @@
+use chrono::{DateTime, Utc};
+
 use heim::{
     process::{Command, Pid, Process, ProcessError},
-    units::Time,
+    units::{
+        time::{nanosecond, second},
+        Time,
+    },
 };
 
 use slog::{debug, info, o, warn, Logger};
 
 use std::{
+    borrow::Cow,
     collections::{
         btree_set::BTreeSet,
         hash_map::{Entry, HashMap},
     },
     path::PathBuf,
+    time::{Duration, SystemTime},
 };
 
 /// Result of a detailed initial process info query.
@@ -34,22 +41,6 @@ pub struct ProcessInfo {
 
 /// Error which can occur while fetching a specific piece of process
 /// information, without that invalidating the entire ProcessInfo struct.
-//
-// NOTE: If we got a NoSuchProcess or a ZombieProcess error, we consider
-//       that the entire ProcessInfo is bogus: the process has exited, and
-//       if we queried again, we'd get the same error for all info.
-//
-//       If we got a Load error, we consider that the entire process
-//       enumeration process is bogus and will abort that higher-level
-//       process. This follows the "this error is unrecoverable" design
-//       principle of heim::Error.
-//
-//       This only leaves AccessDenied errors as something which solely
-//       affects the current process info field, for now.
-//
-//       Also, as far as I know, when querying a process property, the
-//       error's `pid` field can only contain the Pid of the target process.
-//       I'll cross-check that assumption with an assertion.
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProcessInfoFieldError {
@@ -58,19 +49,6 @@ pub enum ProcessInfoFieldError {
 }
 
 /// Error which invalidates the entire ProcessInfo query.
-//
-// NOTE: As far as I know, AccessDenied errors cannot upon while listing
-//       processes, but only while enumerating their individual fields. But
-//       I will cross-check that with an assertion.
-//
-//       Load errors are treated as fatal errors, and therefore abort the
-//       enumeration of the entire process tree, not just the current
-//       process.
-//
-//       Also, as far as I know, when enumerating processes or querying
-//       their properties, the error's `pid` field can only contain the Pid
-//       of the target process. I'll cross-check that assumption with an
-//       assertion whenever possible.
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProcessInfoError {
@@ -90,7 +68,7 @@ pub enum ProcessInfoError {
 ///   even get a Pid. In that case, aborting the enumeration is recommended.
 /// - Even if we did get a Pid, we may not get more than that because the
 ///   target process has exited and all info was lost. In that case, the
-///   enumeration returns the Pid and a process exit error.
+///   enumeration returns the Pid and a ProcessInfoError.
 /// - Finally, we may succeed in querying some info about a process but not
 ///   all of it because we do not have enough permissions. This is
 ///   particularly frequent when querying daemons. In that case, only the
@@ -294,14 +272,53 @@ pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, Process
         // Display that node
         match &current_node.process_info_result {
             Ok(process_info) => {
+                let print_err =
+                    |err: &ProcessInfoFieldError| Cow::from(format!("Unavailable ({:?})", err));
+                let process_name = match &process_info.name {
+                    Ok(name) => name.into(),
+                    Err(err) => print_err(err),
+                };
+                let process_exe = match &process_info.exe {
+                    Ok(exe) => {
+                        if exe.iter().count() == 0 {
+                            "None".into()
+                        } else {
+                            exe.to_string_lossy()
+                        }
+                    }
+                    Err(err) => print_err(err),
+                };
+                let process_command = match &process_info.command {
+                    Ok(command) => {
+                        let args = command
+                            .into_iter()
+                            .map(|arg| arg.to_string_lossy())
+                            .collect::<Vec<_>>();
+                        if args.is_empty() {
+                            "None".into()
+                        } else {
+                            args.join(" ").into()
+                        }
+                    }
+                    Err(err) => print_err(err),
+                };
+                let process_create_time = match &process_info.create_time {
+                    Ok(create_time) => {
+                        let secs = create_time.get::<second>().floor();
+                        let nsecs = create_time.get::<nanosecond>() - 1_000_000_000.0 * secs;
+                        let duration = Duration::new(secs as u64, nsecs as u32);
+                        let system_time = SystemTime::UNIX_EPOCH + duration;
+                        let date_time = DateTime::<Utc>::from(system_time);
+                        format!("{}", date_time).into()
+                    }
+                    Err(err) => print_err(err),
+                };
                 info!(log, "Found a process";
-                      // FIXME: Go beyond debug repr, ideally try to aggregate
-                      //        some errors like nonexistent or zombie too.
                       "pid" => current_pid,
-                      "name" => ?process_info.name,
-                      "executable path" => ?process_info.exe,
-                      "command line" => ?process_info.command,
-                      "creation time" => ?process_info.create_time);
+                      "name" => %process_name,
+                      "executable path" => %process_exe,
+                      "command line" => %process_command,
+                      "creation time" => %process_create_time);
             }
 
             Err(ProcessInfoError::NoSuchProcess) => {
