@@ -3,8 +3,6 @@
 
 mod process;
 
-use crate::process::{get_process_info, ProcessInfo, ProcessInfoError};
-
 use futures_util::{
     future::TryFutureExt,
     stream::{StreamExt, TryStreamExt},
@@ -30,7 +28,7 @@ use heim::{
 use slog::{debug, info, o, warn, Drain, Logger};
 
 use std::{
-    collections::{btree_map, hash_map, BTreeMap, BTreeSet, HashMap},
+    collections::{btree_map, BTreeMap},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Mutex,
 };
@@ -79,8 +77,8 @@ async fn main() -> heim::Result<()> {
     // - Virtualization info
     let virt = heim::virt::detect();
     // - Initial processes info
-    let processes_results = heim::process::processes()
-        .then(get_process_info)
+    let processes = heim::process::processes()
+        .then(process::get_process_info)
         .try_collect::<Vec<_>>();
 
     // Report CPU configuration
@@ -124,138 +122,9 @@ async fn main() -> heim::Result<()> {
     let user_connections = user_connections.await?;
     report_users(&log, user_connections);
 
-    /// A node in the process tree
-    struct ProcessNode {
-        /// The heim Process object from process enumeration
-        ///
-        /// If a process is first referred to as a parent of another process,
-        /// Err(ProcessError::NoSuchProcess(pid)) will be inserted as a
-        /// placeholder value. This placeholder should eventually be replaced by
-        /// the corresponding process enumeration result, unless...
-        ///
-        /// 1. An unlucky race condition occured and a process was seen during
-        ///    process enumeration, but not the parent of that process.
-        /// 2. The process of interest is a special PID that does not actually
-        ///    map into a user-mode system process (like PID 0 on Linux).
-        process_info_result: Result<ProcessInfo, ProcessInfoError>,
-
-        /// Children of this process in the process tree
-        children: BTreeSet<Pid>,
-    }
-
-    // Build a process tree
-    let mut process_tree_nodes = HashMap::<Pid, ProcessNode>::new();
-    let processes_results = processes_results.await?;
-    for (pid, process_info_result) in processes_results {
-        // Did we query this process' parent successfully?
-        // If so, add it as a child of that parent process in the tree
-        let parent_pid_result = process_info_result.as_ref().map(|info| info.parent_pid);
-        if let Ok(Ok(parent_pid)) = parent_pid_result {
-            let insert_result = process_tree_nodes
-                .entry(parent_pid)
-                .or_insert(ProcessNode {
-                    // Use NoSuchProcess error as a placeholder to
-                    // reduce tree data model complexity a little bit.
-                    process_info_result: Err(ProcessInfoError::NoSuchProcess),
-                    children: BTreeSet::new(),
-                })
-                .children
-                .insert(pid);
-            assert!(insert_result, "Registered the same child twice!");
-        }
-
-        // Now, fill that process' node in the process tree
-        match process_tree_nodes.entry(pid) {
-            // No entry yet: either this process was seen before its children or
-            // it does not have any child process.
-            hash_map::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(ProcessNode {
-                    process_info_result,
-                    children: BTreeSet::new(),
-                });
-            }
-
-            // An entry exists, most likely filled because a child was observed
-            // before the parent and had to create its parent's entry. Check
-            // that this is the case and fill in the corresponding node.
-            hash_map::Entry::Occupied(occupied_entry) => {
-                let old_process_info_result = std::mem::replace(
-                    &mut occupied_entry.into_mut().process_info_result,
-                    process_info_result,
-                );
-                assert!(
-                    matches!(
-                        old_process_info_result,
-                        Err(ProcessInfoError::NoSuchProcess)
-                    ),
-                    "Invalid pre-existing process node info!"
-                );
-            }
-        }
-    }
-
-    // Enumerate the roots of the process tree, which have no known parents
-    let mut process_tree_roots = BTreeSet::<Pid>::new();
-    for (&pid, node) in &process_tree_nodes {
-        match &node
-            .process_info_result
-            .as_ref()
-            .map(|info| info.parent_pid)
-        {
-            // Process has a parent, so it's not a root. Skip it.
-            Ok(Ok(_parent_pid)) => {}
-
-            // Process has no known parent, register it as a process tree root.
-            _ => {
-                let insert_result = process_tree_roots.insert(pid);
-                assert!(insert_result, "Registered the same root twice!");
-            }
-        }
-    }
-
-    // We are now ready to recursively print the process tree
-    fn print_process_tree(
-        log: &Logger,
-        current_pid: Pid,
-        process_tree_nodes: &HashMap<Pid, ProcessNode>,
-    ) {
-        // Get the tree node associated with the current process
-        let current_node = &process_tree_nodes[&current_pid];
-
-        // Display that node
-        match &current_node.process_info_result {
-            Ok(process_info) => {
-                info!(log, "Found a process";
-                      // FIXME: Go beyond debug repr, ideally try to aggregate
-                      //        some errors like nonexistent or zombie too.
-                      "pid" => current_pid,
-                      "name" => ?process_info.name,
-                      "executable path" => ?process_info.exe,
-                      "command line" => ?process_info.command,
-                      "creation time" => ?process_info.create_time);
-            }
-
-            Err(ProcessInfoError::NoSuchProcess) => {
-                debug!(log, "Found a nonexistent process (maybe it vanished?)";
-                       "pid" => current_pid);
-            }
-
-            Err(ProcessInfoError::ZombieProcess) => {
-                warn!(log, "Found a process in the zombie state";
-                      "pid" => current_pid);
-            }
-        }
-
-        // Recursively print child nodes
-        let children_log = log.new(o!("parent pid" => current_pid));
-        for &child_pid in &current_node.children {
-            print_process_tree(&children_log, child_pid, process_tree_nodes);
-        }
-    }
-    //
-    for root_pid in process_tree_roots {
-        print_process_tree(&log, root_pid, &process_tree_nodes);
-    }
+    // Report running processes
+    let processes = processes.await?;
+    process::log_report(&log, processes);
 
     // TODO: Extract this system summary to a separate async fn, then start
     //       polling useful "dynamic" quantities in a system monitor like

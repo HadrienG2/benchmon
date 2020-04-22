@@ -3,7 +3,15 @@ use heim::{
     units::Time,
 };
 
-use std::path::PathBuf;
+use slog::{debug, info, o, warn, Logger};
+
+use std::{
+    collections::{
+        btree_set::BTreeSet,
+        hash_map::{Entry, HashMap},
+    },
+    path::PathBuf,
+};
 
 /// Result of a detailed initial process info query.
 pub struct ProcessInfo {
@@ -107,16 +115,16 @@ pub async fn get_process_info(
 
                         // If we got an AccessDenied error, we expect the
                         // received pid to match the process we queried, and
-                        // we consider that this failure only affects the
-                        // active ProcessInfo field.
+                        // we consider that this failure only affects the active
+                        // ProcessInfo field.
                         Err(ProcessError::AccessDenied(res_pid)) => {
                             assert_eq!(res_pid, pid);
                             Err(ProcessInfoFieldError::AccessDenied)
                         }
 
-                        // If we got a NoSuchProcess or a ZombieProcess
-                        // error, we consider it to invalidate the entire
-                        // ProcessInfo struct, but still bubble up the Pid.
+                        // If we got a NoSuchProcess or a ZombieProcess error,
+                        // we consider it to invalidate the entire ProcessInfo
+                        // struct, but still bubble up the Pid.
                         Err(ProcessError::NoSuchProcess(res_pid)) => {
                             assert_eq!(res_pid, pid);
                             return Ok((pid, Err(ProcessInfoError::NoSuchProcess)));
@@ -127,7 +135,7 @@ pub async fn get_process_info(
                         }
 
                         // If we got a Load error, we treat it as an
-                        // unrecoverable heim failure, as advised by the
+                        // unrecoverable heim failure, as advised by the heim
                         // documentation, and thus we abort the entire
                         // process enumeration query.
                         Err(ProcessError::Load(err)) => return Err(err),
@@ -164,14 +172,13 @@ pub async fn get_process_info(
         Err(ProcessError::ZombieProcess(pid)) => Ok((pid, Err(ProcessInfoError::ZombieProcess))),
 
         // Not enough permission to get a Process struct (?)
-        Err(ProcessError::AccessDenied(_pid)) =>
-        // As far as I know, this error cannot happen. The Process type
-        // is basically a thin Pid wrapper, so if you don't have enough
-        // permissions to get the wrapper, you shouldn't have enough
-        // permissions to get a Pid either, and thus a Load error should
-        // occur, not an AccessDenied one. Therefore it doesn't make
-        // sense to account for this error in ProcessInfoError.
-        {
+        Err(ProcessError::AccessDenied(_pid)) => {
+            // As far as I know, this error cannot happen. The Process type
+            // is basically a thin Pid wrapper, so if you don't have enough
+            // permissions to get the wrapper, you shouldn't have enough
+            // permissions to get a Pid either, and thus a Load error should
+            // occur, not an AccessDenied one. Therefore it doesn't make
+            // sense to account for this error in ProcessInfoError.
             unreachable!()
         }
 
@@ -182,5 +189,141 @@ pub async fn get_process_info(
         // Since heim uses nonexhaustive enums, we must
         // error out at runtime instead of at compile time
         _ => unimplemented!("Unsupported process query error"),
+    }
+}
+
+/// Report on the host's running processes
+pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, ProcessInfoError>)>) {
+    /// A node in the process tree
+    struct ProcessNode {
+        /// The heim Process object from process enumeration
+        ///
+        /// If a process is first referred to as a parent of another process,
+        /// Err(ProcessError::NoSuchProcess(pid)) will be inserted as a
+        /// placeholder value. This placeholder should eventually be replaced by
+        /// the corresponding process enumeration result, unless...
+        ///
+        /// 1. An unlucky race condition occured and a process was seen during
+        ///    process enumeration, but not the parent of that process.
+        /// 2. The process of interest is a special PID that does not actually
+        ///    map into a user-mode system process (like PID 0 on Linux).
+        process_info_result: Result<ProcessInfo, ProcessInfoError>,
+
+        /// Children of this process in the process tree
+        children: BTreeSet<Pid>,
+    }
+
+    // Build a process tree
+    let mut process_tree_nodes = HashMap::<Pid, ProcessNode>::new();
+    for (pid, process_info_result) in processes {
+        // Did we query this process' parent successfully?
+        // If so, add it as a child of that parent process in the tree
+        let parent_pid_result = process_info_result.as_ref().map(|info| info.parent_pid);
+        if let Ok(Ok(parent_pid)) = parent_pid_result {
+            let insert_result = process_tree_nodes
+                .entry(parent_pid)
+                .or_insert(ProcessNode {
+                    // Use NoSuchProcess error as a placeholder to
+                    // reduce tree data model complexity a little bit.
+                    process_info_result: Err(ProcessInfoError::NoSuchProcess),
+                    children: BTreeSet::new(),
+                })
+                .children
+                .insert(pid);
+            assert!(insert_result, "Registered the same child twice!");
+        }
+
+        // Now, fill that process' node in the process tree
+        match process_tree_nodes.entry(pid) {
+            // No entry yet: either this process was seen before its children or
+            // it does not have any child process.
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(ProcessNode {
+                    process_info_result,
+                    children: BTreeSet::new(),
+                });
+            }
+
+            // An entry exists, most likely filled because a child was observed
+            // before the parent and had to create its parent's entry. Check
+            // that this is the case and fill in the corresponding node.
+            Entry::Occupied(occupied_entry) => {
+                let old_process_info_result = std::mem::replace(
+                    &mut occupied_entry.into_mut().process_info_result,
+                    process_info_result,
+                );
+                assert!(
+                    matches!(
+                        old_process_info_result,
+                        Err(ProcessInfoError::NoSuchProcess)
+                    ),
+                    "Invalid pre-existing process node info!"
+                );
+            }
+        }
+    }
+
+    // Enumerate the roots of the process tree, which have no known parents
+    let mut process_tree_roots = BTreeSet::<Pid>::new();
+    for (&pid, node) in &process_tree_nodes {
+        match &node
+            .process_info_result
+            .as_ref()
+            .map(|info| info.parent_pid)
+        {
+            // Process has a parent, so it's not a root. Skip it.
+            Ok(Ok(_parent_pid)) => {}
+
+            // Process has no known parent, register it as a process tree root.
+            _ => {
+                let insert_result = process_tree_roots.insert(pid);
+                assert!(insert_result, "Registered the same root twice!");
+            }
+        }
+    }
+
+    // We are now ready to recursively print the process tree
+    fn print_process_tree(
+        log: &Logger,
+        current_pid: Pid,
+        process_tree_nodes: &HashMap<Pid, ProcessNode>,
+    ) {
+        // Get the tree node associated with the current process
+        let current_node = &process_tree_nodes[&current_pid];
+
+        // Display that node
+        match &current_node.process_info_result {
+            Ok(process_info) => {
+                info!(log, "Found a process";
+                      // FIXME: Go beyond debug repr, ideally try to aggregate
+                      //        some errors like nonexistent or zombie too.
+                      "pid" => current_pid,
+                      "name" => ?process_info.name,
+                      "executable path" => ?process_info.exe,
+                      "command line" => ?process_info.command,
+                      "creation time" => ?process_info.create_time);
+            }
+
+            Err(ProcessInfoError::NoSuchProcess) => {
+                debug!(log, "Found a nonexistent process (it likely vanished, \
+                             or isn't a real system process)";
+                       "pid" => current_pid);
+            }
+
+            Err(ProcessInfoError::ZombieProcess) => {
+                warn!(log, "Found a process in the zombie state";
+                      "pid" => current_pid);
+            }
+        }
+
+        // Recursively print child nodes
+        let children_log = log.new(o!("parent pid" => current_pid));
+        for &child_pid in &current_node.children {
+            print_process_tree(&children_log, child_pid, process_tree_nodes);
+        }
+    }
+    //
+    for root_pid in process_tree_roots {
+        print_process_tree(&log, root_pid, &process_tree_nodes);
     }
 }
