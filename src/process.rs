@@ -8,7 +8,7 @@ use heim::{
     },
 };
 
-use slog::{debug, info, o, warn, Logger};
+use slog::{debug, error, info, o, warn, Logger};
 
 use std::{
     borrow::Cow,
@@ -23,20 +23,20 @@ use std::{
 /// Result of a detailed initial process info query.
 pub struct ProcessInfo {
     /// PID of the parent process
-    pub parent_pid: Result<Pid, ProcessInfoFieldError>,
+    parent_pid: Result<Pid, ProcessInfoFieldError>,
 
     /// Name of this process
-    pub name: Result<String, ProcessInfoFieldError>,
+    name: Result<String, ProcessInfoFieldError>,
 
     /// Path to this process' executable
-    pub exe: Result<PathBuf, ProcessInfoFieldError>,
+    exe: Result<PathBuf, ProcessInfoFieldError>,
 
     /// Command line with which the process was invoked
-    pub command: Result<Command, ProcessInfoFieldError>,
+    command: Result<Command, ProcessInfoFieldError>,
 
     /// Time at which the process was created, since Unix epoch
     // TODO: Convert to something like SystemTime instead
-    pub create_time: Result<Time, ProcessInfoFieldError>,
+    create_time: Result<Time, ProcessInfoFieldError>,
 }
 
 /// Error which can occur while fetching a specific piece of process
@@ -52,6 +52,9 @@ pub enum ProcessInfoFieldError {
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProcessInfoError {
+    /// Not enough permissions to query a Process struct.
+    AccessDenied,
+
     /// The process exited during the query and doesn't exist anymore.
     NoSuchProcess,
 
@@ -149,23 +152,20 @@ pub async fn get_process_info(
         // parent process waits for that)
         Err(ProcessError::ZombieProcess(pid)) => Ok((pid, Err(ProcessInfoError::ZombieProcess))),
 
-        // Not enough permission to get a Process struct (?)
-        Err(ProcessError::AccessDenied(_pid)) => {
-            // As far as I know, this error cannot happen. The Process type
-            // is basically a thin Pid wrapper, so if you don't have enough
-            // permissions to get the wrapper, you shouldn't have enough
-            // permissions to get a Pid either, and thus a Load error should
-            // occur, not an AccessDenied one. Therefore it doesn't make
-            // sense to account for this error in ProcessInfoError.
-            unreachable!()
-        }
+        // Not enough permission to get a Process struct, but still got a Pid
+        //
+        // This error condition may seem a little curious to you if you think of
+        // Process as a Pid wrapper. But it can actually happen because on some
+        // platforms, heim unconditionally queries process creation times in
+        // order to make the Process struct unambiguously equality-comparable.
+        Err(ProcessError::AccessDenied(pid)) => Ok((pid, Err(ProcessInfoError::AccessDenied))),
 
         // Unrecoverable heim failure upon loading process data, we didn't
         // even manage to get the process' Pid.
         Err(ProcessError::Load(err)) => Err(err),
 
-        // Since heim uses nonexhaustive enums, we must
-        // error out at runtime instead of at compile time
+        // Since heim uses nonexhaustive enums, we must error out at runtime
+        // instead of at compile time when an unknown error happens
         _ => unimplemented!("Unsupported process query error"),
     }
 }
@@ -319,6 +319,11 @@ pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, Process
                       "executable path" => %process_exe,
                       "command line" => %process_command,
                       "creation time" => %process_create_time);
+            }
+
+            Err(ProcessInfoError::AccessDenied) => {
+                error!(log, "Found a process, but access to its info was denied";
+                       "pid" => current_pid);
             }
 
             Err(ProcessInfoError::NoSuchProcess) => {
