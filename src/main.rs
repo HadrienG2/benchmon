@@ -2,6 +2,7 @@
 #![type_length_limit = "20000000"]
 
 mod cpu;
+mod memory;
 mod process;
 
 use futures_util::{
@@ -13,7 +14,6 @@ use futures_util::{
 use heim::{
     disk::{Partition, Usage},
     host::{Pid, Platform, User},
-    memory::{Memory, Swap},
     net::{Address, MacAddr, Nic},
     sensors::TemperatureSensor,
     units::{
@@ -99,7 +99,7 @@ async fn main() -> heim::Result<()> {
 
     // Report memory configuration
     let (memory, swap) = try_join!(memory, swap)?;
-    report_memory(&log, memory, swap);
+    memory::startup_report(&log, memory, swap);
 
     // Report filesystem configuration
     let disk_partitions_and_usage = disk_partitions_and_usage.await?;
@@ -138,22 +138,6 @@ async fn main() -> heim::Result<()> {
     // TODO: Add a way to selectively enable/disable stats.
 
     Ok(())
-}
-
-// Report on the host's memory configuration
-fn report_memory(log: &Logger, memory: Memory, swap: Swap) {
-    info!(log, "Received memory configuration information";
-          "RAM size" => format_information(memory.total()),
-          "swap size" => format_information(swap.total()));
-
-    if swap.used() > swap.total() / 10 {
-        warn!(
-            log,
-            "Non-negligible use of swap detected, make sure that it doesn't
-             bias your benchmark!";
-            "swap usage" => format_information(swap.used())
-        );
-    }
 }
 
 // Report on the host's file system configuration
