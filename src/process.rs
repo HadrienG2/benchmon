@@ -373,7 +373,7 @@ pub async fn get_process_info(
 }
 
 /// Report on the host's running processes
-pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, ProcessInfoError>)>) {
+pub fn startup_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, ProcessInfoError>)>) {
     // Build a process tree and log its contents
     debug!(log, "Processing process tree...");
     let process_tree = ProcessTree::from(processes);
