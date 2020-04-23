@@ -4,6 +4,7 @@
 mod cpu;
 mod filesystem;
 mod memory;
+mod os;
 mod process;
 mod sensors;
 
@@ -14,10 +15,9 @@ use futures_util::{
 };
 
 use heim::{
-    host::{Pid, Platform, User},
+    host::{Pid, User},
     net::{Address, MacAddr, Nic},
     units::{information::byte, Information},
-    virt::Virtualization,
 };
 
 use slog::{debug, info, o, warn, Drain, Logger};
@@ -111,7 +111,7 @@ async fn main() -> heim::Result<()> {
 
     // Report operating system and use of virtualization
     let virt = virt.await;
-    report_os(&log, platform, virt);
+    os::startup_report(&log, platform, virt);
 
     // Report open user sessions
     let user_connections = user_connections.await?;
@@ -453,27 +453,6 @@ fn report_network(log: &Logger, network_interfaces: Vec<Nic>) {
                   "netmask" => ?netmask,
                   "target" => ?ipv6_address_props.target);
         }
-    }
-}
-
-/// Report on the host's operating system and use of virtualization
-fn report_os(log: &Logger, platform: Platform, virt: Option<Virtualization>) {
-    info!(
-        log,
-        "Received host OS information";
-        "hostname" => platform.hostname(),
-        "OS name" => platform.system(),
-        "OS release" => platform.release(),
-        "OS version" => platform.version()
-    );
-
-    if let Some(virt) = virt {
-        warn!(
-            log,
-            "Found underlying virtualization layers, make sure that they don't \
-             bias your benchmarks!";
-            "detected virtualization scheme" => ?virt
-        );
     }
 }
 
