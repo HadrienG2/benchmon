@@ -7,6 +7,7 @@ mod memory;
 mod os;
 mod process;
 mod sensors;
+mod users;
 
 use futures_util::{
     future::TryFutureExt,
@@ -15,12 +16,11 @@ use futures_util::{
 };
 
 use heim::{
-    host::{Pid, User},
     net::{Address, MacAddr, Nic},
     units::{information::byte, Information},
 };
 
-use slog::{debug, info, o, warn, Drain, Logger};
+use slog::{debug, info, o, Drain, Logger};
 
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -115,7 +115,7 @@ async fn main() -> heim::Result<()> {
 
     // Report open user sessions
     let user_connections = user_connections.await?;
-    report_users(&log, user_connections);
+    users::startup_report(&log, user_connections);
 
     // Report running processes
     let processes = processes.await?;
@@ -453,74 +453,6 @@ fn report_network(log: &Logger, network_interfaces: Vec<Nic>) {
                   "netmask" => ?netmask,
                   "target" => ?ipv6_address_props.target);
         }
-    }
-}
-
-/// Report on the host's open user sessions
-fn report_users(log: &Logger, user_connections: Vec<User>) {
-    // TODO: Consider returning some of this for future use
-    type SessionId = i32; // FIXME: Make heim expose this
-    #[derive(Default)]
-    struct UserStats {
-        /// Total number of connections opened by this user
-        connection_count: usize,
-
-        /// Breakdown of these connections into sessions and login processes
-        /// (This data is, for now, only available on Linux)
-        sessions_to_pids: Option<BTreeMap<SessionId, Vec<Pid>>>,
-    };
-    let mut usernames_to_stats = BTreeMap::<String, UserStats>::new();
-
-    debug!(log, "Processing user connection list...");
-    for connection in user_connections {
-        let username = connection.username().to_owned();
-        let user_log = log.new(o!("username" => username.clone()));
-        debug!(user_log, "Found a user connection");
-
-        let user_stats = usernames_to_stats.entry(username).or_default();
-        user_stats.connection_count += 1;
-
-        #[cfg(target_os = "linux")]
-        {
-            use heim::host::os::linux::UserExt;
-            debug!(user_log,
-                   "Got Linux-specific connection details";
-                   "login process PID" => connection.pid(),
-                   "(pseudo-)tty name" => connection.terminal(),
-                   "terminal identifier" => connection.id(),
-                   "remote hostname" => connection.hostname(),
-                   "remote IP address" => ?connection.address(),
-                   "session ID" => connection.session_id());
-            let session_stats = user_stats
-                .sessions_to_pids
-                .get_or_insert_with(Default::default)
-                .entry(connection.session_id())
-                .or_default();
-            session_stats.push(connection.pid());
-        }
-    }
-
-    for (username, stats) in &mut usernames_to_stats {
-        let user_log = log.new(o!("username" => username.clone()));
-        info!(user_log, "Found a logged-in user";
-              "open connection count" => stats.connection_count);
-        if let Some(ref mut sessions_to_pids) = &mut stats.sessions_to_pids {
-            for (session_id, login_pids) in sessions_to_pids {
-                login_pids.sort();
-                info!(user_log,
-                      "Got details of a user session";
-                      "session ID" => session_id,
-                      "login process PID(s)" => ?login_pids);
-            }
-        }
-    }
-
-    if usernames_to_stats.len() > 1 {
-        warn!(
-            log,
-            "Detected multiple logged-in users, make sure others keep the \
-             system quiet while your benchmarks are running!"
-        );
     }
 }
 
