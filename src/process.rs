@@ -20,6 +20,25 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// A node in the process tree that will be printed during the report
+struct ProcessTreeNode {
+    /// Info about this process gathered during process enumeration
+    ///
+    /// If a process is first referred to as a parent of another process,
+    /// Err(ProcessInfoError::NoSuchProcess) will be inserted as a placeholder
+    /// value. This placeholder should eventually be replaced by the
+    /// corresponding process enumeration result, unless...
+    ///
+    /// 1. An unlucky race condition occured and a process was seen during
+    ///    process enumeration, but not the parent of that process.
+    /// 2. The process of interest is a special PID that does not actually
+    ///    map into a user-mode system process (like PID 0 on Linux).
+    process_info: Result<ProcessInfo, ProcessInfoError>,
+
+    /// Children of this process in the process tree
+    children: BTreeSet<Pid>,
+}
+
 /// Result of a detailed initial process info query.
 pub struct ProcessInfo {
     /// PID of the parent process
@@ -172,38 +191,19 @@ pub async fn get_process_info(
 
 /// Report on the host's running processes
 pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, ProcessInfoError>)>) {
-    /// A node in the process tree
-    struct ProcessNode {
-        /// The heim Process object from process enumeration
-        ///
-        /// If a process is first referred to as a parent of another process,
-        /// Err(ProcessError::NoSuchProcess(pid)) will be inserted as a
-        /// placeholder value. This placeholder should eventually be replaced by
-        /// the corresponding process enumeration result, unless...
-        ///
-        /// 1. An unlucky race condition occured and a process was seen during
-        ///    process enumeration, but not the parent of that process.
-        /// 2. The process of interest is a special PID that does not actually
-        ///    map into a user-mode system process (like PID 0 on Linux).
-        process_info_result: Result<ProcessInfo, ProcessInfoError>,
-
-        /// Children of this process in the process tree
-        children: BTreeSet<Pid>,
-    }
-
     // Build a process tree
-    let mut process_tree_nodes = HashMap::<Pid, ProcessNode>::new();
-    for (pid, process_info_result) in processes {
+    let mut process_tree_nodes = HashMap::<Pid, ProcessTreeNode>::new();
+    for (pid, process_info) in processes {
         // Did we query this process' parent successfully?
         // If so, add it as a child of that parent process in the tree
-        let parent_pid_result = process_info_result.as_ref().map(|info| info.parent_pid);
+        let parent_pid_result = process_info.as_ref().map(|info| info.parent_pid);
         if let Ok(Ok(parent_pid)) = parent_pid_result {
             let insert_result = process_tree_nodes
                 .entry(parent_pid)
-                .or_insert(ProcessNode {
+                .or_insert(ProcessTreeNode {
                     // Use NoSuchProcess error as a placeholder to
                     // reduce tree data model complexity a little bit.
-                    process_info_result: Err(ProcessInfoError::NoSuchProcess),
+                    process_info: Err(ProcessInfoError::NoSuchProcess),
                     children: BTreeSet::new(),
                 })
                 .children
@@ -216,8 +216,8 @@ pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, Process
             // No entry yet: either this process was seen before its children or
             // it does not have any child process.
             Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(ProcessNode {
-                    process_info_result,
+                vacant_entry.insert(ProcessTreeNode {
+                    process_info,
                     children: BTreeSet::new(),
                 });
             }
@@ -226,15 +226,10 @@ pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, Process
             // before the parent and had to create its parent's entry. Check
             // that this is the case and fill in the corresponding node.
             Entry::Occupied(occupied_entry) => {
-                let old_process_info_result = std::mem::replace(
-                    &mut occupied_entry.into_mut().process_info_result,
-                    process_info_result,
-                );
+                let old_process_info =
+                    std::mem::replace(&mut occupied_entry.into_mut().process_info, process_info);
                 assert!(
-                    matches!(
-                        old_process_info_result,
-                        Err(ProcessInfoError::NoSuchProcess)
-                    ),
+                    matches!(old_process_info, Err(ProcessInfoError::NoSuchProcess)),
                     "Invalid pre-existing process node info!"
                 );
             }
@@ -244,11 +239,7 @@ pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, Process
     // Enumerate the roots of the process tree, which have no known parents
     let mut process_tree_roots = BTreeSet::<Pid>::new();
     for (&pid, node) in &process_tree_nodes {
-        match &node
-            .process_info_result
-            .as_ref()
-            .map(|info| info.parent_pid)
-        {
+        match &node.process_info.as_ref().map(|info| info.parent_pid) {
             // Process has a parent, so it's not a root. Skip it.
             Ok(Ok(_parent_pid)) => {}
 
@@ -264,13 +255,13 @@ pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, Process
     fn print_process_tree(
         log: &Logger,
         current_pid: Pid,
-        process_tree_nodes: &HashMap<Pid, ProcessNode>,
+        process_tree_nodes: &HashMap<Pid, ProcessTreeNode>,
     ) {
         // Get the tree node associated with the current process
         let current_node = &process_tree_nodes[&current_pid];
 
         // Display that node
-        match &current_node.process_info_result {
+        match &current_node.process_info {
             Ok(process_info) => {
                 let print_err =
                     |err: &ProcessInfoFieldError| Cow::from(format!("Unavailable ({:?})", err));
