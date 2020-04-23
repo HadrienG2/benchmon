@@ -8,7 +8,7 @@ use heim::{
     },
 };
 
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{debug, error, o, warn, Logger};
 
 use std::{
     borrow::Cow,
@@ -92,18 +92,9 @@ where
 
         // Enumerate the roots of the process tree, which have no known parents
         //
-        // NOTE: Instead of iterating over the entire process set a second time,
-        //       another way would be to track possible roots during the process
-        //       info enumeration stage.
-        //
-        //       Basically, whenever a node with no known parent is inserted, it
-        //       is added to the root set, and if this node latter turns out to
-        //       actually have parents, then it is removed from the root set.
-        //
-        //       As it is relatively rare that a process is first believed to
-        //       have no parent, then latter turns out to have a parent (that's
-        //       basically when children come before parents in the process list
-        //       which means they have a lower Pid), this may be faster.
+        // NOTE: Could build the tree root set dynamically above to avoid this
+        //       second algorithmic pass, but it would make the code less clear
+        //       while this is not a performance bottleneck right now.
         //
         for (&pid, node) in &process_tree.nodes {
             match &node.process_info.as_ref().map(|info| info.parent_pid) {
@@ -179,12 +170,12 @@ impl ProcessTree {
                     }
                     Err(err) => print_err(err),
                 };
-                info!(log, "Found a process";
-                      "pid" => current_pid,
-                      "name" => %process_name,
-                      "executable path" => %process_exe,
-                      "command line" => %process_command,
-                      "creation time" => %process_create_time);
+                debug!(log, "Found a process";
+                       "pid" => current_pid,
+                       "name" => %process_name,
+                       "executable path" => %process_exe,
+                       "command line" => %process_command,
+                       "creation time" => %process_create_time);
             }
 
             Err(ProcessInfoError::AccessDenied) => {
@@ -384,6 +375,7 @@ pub async fn get_process_info(
 /// Report on the host's running processes
 pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, ProcessInfoError>)>) {
     // Build a process tree and log its contents
+    debug!(log, "Processing process tree...");
     let process_tree = ProcessTree::from(processes);
     process_tree.log(log);
 }
