@@ -2,7 +2,7 @@ use heim::memory::{Memory, Swap};
 
 use slog::{info, warn, Logger};
 
-// Report on the host's memory configuration
+/// Report on the host's memory configuration
 pub fn startup_report(log: &Logger, memory: Memory, swap: Swap) {
     info!(log, "Received memory configuration information";
           "RAM size" => crate::format_information(memory.total()),

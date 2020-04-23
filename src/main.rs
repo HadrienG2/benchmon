@@ -2,6 +2,7 @@
 #![type_length_limit = "20000000"]
 
 mod cpu;
+mod filesystem;
 mod memory;
 mod process;
 
@@ -12,14 +13,12 @@ use futures_util::{
 };
 
 use heim::{
-    disk::{Partition, Usage},
     host::{Pid, Platform, User},
     net::{Address, MacAddr, Nic},
     sensors::TemperatureSensor,
     units::{
-        information::byte,
-        thermodynamic_temperature::degree_celsius,
-        Information, ThermodynamicTemperature as Temperature,
+        information::byte, thermodynamic_temperature::degree_celsius, Information,
+        ThermodynamicTemperature as Temperature,
     },
     virt::Virtualization,
 };
@@ -103,7 +102,7 @@ async fn main() -> heim::Result<()> {
 
     // Report filesystem configuration
     let disk_partitions_and_usage = disk_partitions_and_usage.await?;
-    report_filesystem(&log, disk_partitions_and_usage);
+    filesystem::startup_report(&log, disk_partitions_and_usage);
 
     // Report network configuration
     let network_interfaces = network_interfaces.await?;
@@ -138,59 +137,6 @@ async fn main() -> heim::Result<()> {
     // TODO: Add a way to selectively enable/disable stats.
 
     Ok(())
-}
-
-// Report on the host's file system configuration
-fn report_filesystem(
-    log: &Logger,
-    disk_partitions_and_usage: Vec<(Partition, heim::Result<Usage>)>,
-) {
-    debug!(log, "Processing filesystem mount list...");
-    let mut dev_to_mounts = BTreeMap::<_, Vec<_>>::new();
-    for (partition, usage) in disk_partitions_and_usage {
-        // Use disk capacity and disk usage (if available) as a last-resort
-        // disambiguation key for mounts with identical device name and size
-        // (e.g. unrelated tmpfs mounts on Linux).
-        let known_used_bytes = usage
-            .as_ref()
-            .map(|usage| usage.used().get::<byte>())
-            .unwrap_or(0);
-        let capacity = usage.map(|usage| usage.total().clone());
-
-        // Need to eagerly format device stats as otherwise they can't be used
-        // as BTreeMap keys... which is kind of sad.
-        let formatted_device = if let Some(device) = partition.device() {
-            device.to_string_lossy().into_owned()
-        } else {
-            "none".to_owned()
-        };
-        let formatted_capacity = match capacity {
-            Ok(capacity) => format_information(capacity),
-            Err(err) => format!("Unavailable ({})", err),
-        };
-        let formatted_filesystem = partition.file_system().as_str().to_owned();
-
-        // Group/sort mount points by sorted device name, then capacity, then
-        // filesystem, and finally our hidden used storage disambiguation key.
-        let mount_list = dev_to_mounts
-            .entry((
-                formatted_device,
-                formatted_capacity,
-                formatted_filesystem,
-                known_used_bytes,
-            ))
-            .or_default();
-        mount_list.push(partition.mount_point().to_owned());
-    }
-
-    for ((device, capacity, file_system, _used_bytes), mut mount_list) in dev_to_mounts {
-        mount_list.sort();
-        info!(log, "Found a mounted device";
-              "device name" => device,
-              "capacity" => capacity,
-              "file system" => file_system,
-              "mount point(s)" => ?mount_list);
-    }
 }
 
 fn report_network(log: &Logger, network_interfaces: Vec<Nic>) {
@@ -654,6 +600,6 @@ fn format_information(quantity: Information) -> String {
         3..=5 => format_bytes(3, "kB"),
         6..=8 => format_bytes(6, "MB"),
         9..=11 => format_bytes(9, "GB"),
-        _ => format_bytes(12, "TB")
+        _ => format_bytes(12, "TB"),
     }
 }
