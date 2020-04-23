@@ -20,7 +20,199 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// A node in the process tree that will be printed during the report
+/// The process tree that is generated and printed during the initial report
+#[derive(Default)]
+struct ProcessTree {
+    /// Roots of the process tree, which have no known parent
+    roots: BTreeSet<Pid>,
+
+    /// Nodes of the process tree (per-process info + children)
+    nodes: HashMap<Pid, ProcessTreeNode>,
+}
+
+impl<ProcessInfoIter> From<ProcessInfoIter> for ProcessTree
+where
+    ProcessInfoIter: IntoIterator<Item = (Pid, Result<ProcessInfo, ProcessInfoError>)>,
+{
+    /// Build a process tree from per-process info
+    fn from(process_info_iter: ProcessInfoIter) -> Self {
+        // Setup our input iterator and process tree
+        let process_info_iter = process_info_iter.into_iter();
+        let mut process_tree = ProcessTree::default();
+        if let Some(num_processes) = process_info_iter.size_hint().1 {
+            process_tree.nodes.reserve(num_processes);
+        }
+
+        // Fill in the process tree's nodes
+        for (pid, process_info) in process_info_iter {
+            // Did we query this process' parent successfully?
+            // If so, add it as a child of that parent process in the tree
+            let parent_pid_result = process_info.as_ref().map(|info| info.parent_pid);
+            if let Ok(Ok(parent_pid)) = parent_pid_result {
+                let insert_result = process_tree
+                    .nodes
+                    .entry(parent_pid)
+                    .or_insert(ProcessTreeNode {
+                        // Use NoSuchProcess error as a placeholder to
+                        // reduce tree data model complexity a little bit.
+                        process_info: Err(ProcessInfoError::NoSuchProcess),
+                        children: BTreeSet::new(),
+                    })
+                    .children
+                    .insert(pid);
+                assert!(insert_result, "Registered the same child twice!");
+            }
+
+            // Now, fill that process' node in the process tree
+            match process_tree.nodes.entry(pid) {
+                // No entry yet: either this process was seen before its children or
+                // it does not have any child process.
+                Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(ProcessTreeNode {
+                        process_info,
+                        children: BTreeSet::new(),
+                    });
+                }
+
+                // An entry exists, most likely filled because a child was observed
+                // before the parent and had to create its parent's entry. Check
+                // that this is the case and fill in the corresponding node.
+                Entry::Occupied(occupied_entry) => {
+                    let old_process_info = std::mem::replace(
+                        &mut occupied_entry.into_mut().process_info,
+                        process_info,
+                    );
+                    assert!(
+                        matches!(old_process_info, Err(ProcessInfoError::NoSuchProcess)),
+                        "Invalid pre-existing process node info!"
+                    );
+                }
+            }
+        }
+
+        // Enumerate the roots of the process tree, which have no known parents
+        //
+        // NOTE: Instead of iterating over the entire process set a second time,
+        //       another way would be to track possible roots during the process
+        //       info enumeration stage.
+        //
+        //       Basically, whenever a node with no known parent is inserted, it
+        //       is added to the root set, and if this node latter turns out to
+        //       actually have parents, then it is removed from the root set.
+        //
+        //       As it is relatively rare that a process is first believed to
+        //       have no parent, then latter turns out to have a parent (that's
+        //       basically when children come before parents in the process list
+        //       which means they have a lower Pid), this may be faster.
+        //
+        for (&pid, node) in &process_tree.nodes {
+            match &node.process_info.as_ref().map(|info| info.parent_pid) {
+                // Process has a parent, so it's not a root. Skip it.
+                Ok(Ok(_parent_pid)) => {}
+
+                // Process has no known parent, register it as a process tree root.
+                _ => {
+                    let insert_result = process_tree.roots.insert(pid);
+                    assert!(insert_result, "Registered the same root twice!");
+                }
+            }
+        }
+
+        process_tree
+    }
+}
+
+impl ProcessTree {
+    /// Log the contents of the process tree (for the benchmon startup report)
+    pub fn log(&self, log: &Logger) {
+        for &root_pid in &self.roots {
+            self.log_subtree(&log, root_pid);
+        }
+    }
+
+    /// Log a subtree of the process tree
+    fn log_subtree(&self, log: &Logger, current_pid: Pid) {
+        // Get the tree node associated with the current process
+        let current_node = &self.nodes[&current_pid];
+
+        // Log the info from that node
+        match &current_node.process_info {
+            Ok(process_info) => {
+                let print_err =
+                    |err: &ProcessInfoFieldError| Cow::from(format!("Unavailable ({:?})", err));
+                let process_name = match &process_info.name {
+                    Ok(name) => name.into(),
+                    Err(err) => print_err(err),
+                };
+                let process_exe = match &process_info.exe {
+                    Ok(exe) => {
+                        if exe.iter().count() == 0 {
+                            "None".into()
+                        } else {
+                            exe.to_string_lossy()
+                        }
+                    }
+                    Err(err) => print_err(err),
+                };
+                let process_command = match &process_info.command {
+                    Ok(command) => {
+                        let args = command
+                            .into_iter()
+                            .map(|arg| arg.to_string_lossy())
+                            .collect::<Vec<_>>();
+                        if args.is_empty() {
+                            "None".into()
+                        } else {
+                            args.join(" ").into()
+                        }
+                    }
+                    Err(err) => print_err(err),
+                };
+                let process_create_time = match &process_info.create_time {
+                    Ok(create_time) => {
+                        let secs = create_time.get::<second>().floor();
+                        let nsecs = create_time.get::<nanosecond>() - 1_000_000_000.0 * secs;
+                        let duration = Duration::new(secs as u64, nsecs as u32);
+                        let system_time = SystemTime::UNIX_EPOCH + duration;
+                        let date_time = DateTime::<Local>::from(system_time);
+                        format!("{}", date_time).into()
+                    }
+                    Err(err) => print_err(err),
+                };
+                info!(log, "Found a process";
+                      "pid" => current_pid,
+                      "name" => %process_name,
+                      "executable path" => %process_exe,
+                      "command line" => %process_command,
+                      "creation time" => %process_create_time);
+            }
+
+            Err(ProcessInfoError::AccessDenied) => {
+                error!(log, "Found a process, but access to its info was denied";
+                       "pid" => current_pid);
+            }
+
+            Err(ProcessInfoError::NoSuchProcess) => {
+                debug!(log, "Found a nonexistent process (it likely vanished, \
+                             or isn't a real system process)";
+                       "pid" => current_pid);
+            }
+
+            Err(ProcessInfoError::ZombieProcess) => {
+                warn!(log, "Found a process in the zombie state";
+                      "pid" => current_pid);
+            }
+        }
+
+        // Recursively log info about child nodes
+        let children_log = log.new(o!("parent pid" => current_pid));
+        for &child_pid in &current_node.children {
+            self.log_subtree(&children_log, child_pid);
+        }
+    }
+}
+
+/// A node in the process tree from the initial report
 struct ProcessTreeNode {
     /// Info about this process gathered during process enumeration
     ///
@@ -191,152 +383,7 @@ pub async fn get_process_info(
 
 /// Report on the host's running processes
 pub fn log_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, ProcessInfoError>)>) {
-    // Build a process tree
-    let mut process_tree_nodes = HashMap::<Pid, ProcessTreeNode>::new();
-    for (pid, process_info) in processes {
-        // Did we query this process' parent successfully?
-        // If so, add it as a child of that parent process in the tree
-        let parent_pid_result = process_info.as_ref().map(|info| info.parent_pid);
-        if let Ok(Ok(parent_pid)) = parent_pid_result {
-            let insert_result = process_tree_nodes
-                .entry(parent_pid)
-                .or_insert(ProcessTreeNode {
-                    // Use NoSuchProcess error as a placeholder to
-                    // reduce tree data model complexity a little bit.
-                    process_info: Err(ProcessInfoError::NoSuchProcess),
-                    children: BTreeSet::new(),
-                })
-                .children
-                .insert(pid);
-            assert!(insert_result, "Registered the same child twice!");
-        }
-
-        // Now, fill that process' node in the process tree
-        match process_tree_nodes.entry(pid) {
-            // No entry yet: either this process was seen before its children or
-            // it does not have any child process.
-            Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(ProcessTreeNode {
-                    process_info,
-                    children: BTreeSet::new(),
-                });
-            }
-
-            // An entry exists, most likely filled because a child was observed
-            // before the parent and had to create its parent's entry. Check
-            // that this is the case and fill in the corresponding node.
-            Entry::Occupied(occupied_entry) => {
-                let old_process_info =
-                    std::mem::replace(&mut occupied_entry.into_mut().process_info, process_info);
-                assert!(
-                    matches!(old_process_info, Err(ProcessInfoError::NoSuchProcess)),
-                    "Invalid pre-existing process node info!"
-                );
-            }
-        }
-    }
-
-    // Enumerate the roots of the process tree, which have no known parents
-    let mut process_tree_roots = BTreeSet::<Pid>::new();
-    for (&pid, node) in &process_tree_nodes {
-        match &node.process_info.as_ref().map(|info| info.parent_pid) {
-            // Process has a parent, so it's not a root. Skip it.
-            Ok(Ok(_parent_pid)) => {}
-
-            // Process has no known parent, register it as a process tree root.
-            _ => {
-                let insert_result = process_tree_roots.insert(pid);
-                assert!(insert_result, "Registered the same root twice!");
-            }
-        }
-    }
-
-    // We are now ready to recursively print the process tree
-    fn print_process_tree(
-        log: &Logger,
-        current_pid: Pid,
-        process_tree_nodes: &HashMap<Pid, ProcessTreeNode>,
-    ) {
-        // Get the tree node associated with the current process
-        let current_node = &process_tree_nodes[&current_pid];
-
-        // Display that node
-        match &current_node.process_info {
-            Ok(process_info) => {
-                let print_err =
-                    |err: &ProcessInfoFieldError| Cow::from(format!("Unavailable ({:?})", err));
-                let process_name = match &process_info.name {
-                    Ok(name) => name.into(),
-                    Err(err) => print_err(err),
-                };
-                let process_exe = match &process_info.exe {
-                    Ok(exe) => {
-                        if exe.iter().count() == 0 {
-                            "None".into()
-                        } else {
-                            exe.to_string_lossy()
-                        }
-                    }
-                    Err(err) => print_err(err),
-                };
-                let process_command = match &process_info.command {
-                    Ok(command) => {
-                        let args = command
-                            .into_iter()
-                            .map(|arg| arg.to_string_lossy())
-                            .collect::<Vec<_>>();
-                        if args.is_empty() {
-                            "None".into()
-                        } else {
-                            args.join(" ").into()
-                        }
-                    }
-                    Err(err) => print_err(err),
-                };
-                let process_create_time = match &process_info.create_time {
-                    Ok(create_time) => {
-                        let secs = create_time.get::<second>().floor();
-                        let nsecs = create_time.get::<nanosecond>() - 1_000_000_000.0 * secs;
-                        let duration = Duration::new(secs as u64, nsecs as u32);
-                        let system_time = SystemTime::UNIX_EPOCH + duration;
-                        let date_time = DateTime::<Local>::from(system_time);
-                        format!("{}", date_time).into()
-                    }
-                    Err(err) => print_err(err),
-                };
-                info!(log, "Found a process";
-                      "pid" => current_pid,
-                      "name" => %process_name,
-                      "executable path" => %process_exe,
-                      "command line" => %process_command,
-                      "creation time" => %process_create_time);
-            }
-
-            Err(ProcessInfoError::AccessDenied) => {
-                error!(log, "Found a process, but access to its info was denied";
-                       "pid" => current_pid);
-            }
-
-            Err(ProcessInfoError::NoSuchProcess) => {
-                debug!(log, "Found a nonexistent process (it likely vanished, \
-                             or isn't a real system process)";
-                       "pid" => current_pid);
-            }
-
-            Err(ProcessInfoError::ZombieProcess) => {
-                warn!(log, "Found a process in the zombie state";
-                      "pid" => current_pid);
-            }
-        }
-
-        // Recursively print child nodes
-        let children_log = log.new(o!("parent pid" => current_pid));
-        for &child_pid in &current_node.children {
-            print_process_tree(&children_log, child_pid, process_tree_nodes);
-        }
-    }
-    //
-    for root_pid in process_tree_roots {
-        print_process_tree(&log, root_pid, &process_tree_nodes);
-    }
+    // Build a process tree and log its contents
+    let process_tree = ProcessTree::from(processes);
+    process_tree.log(log);
 }
