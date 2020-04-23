@@ -532,7 +532,7 @@ fn report_users(log: &Logger, user_connections: Vec<User>) {
     for connection in user_connections {
         let username = connection.username().to_owned();
         let user_log = log.new(o!("username" => username.clone()));
-        debug!(user_log, "Found a new user connection");
+        debug!(user_log, "Found a user connection");
 
         let user_stats = usernames_to_stats.entry(username).or_default();
         user_stats.connection_count += 1;
@@ -586,16 +586,23 @@ fn format_information(quantity: Information) -> String {
     // Get the quantity of information in bytes
     let bytes = quantity.get::<byte>();
 
+    // Check that quantity's order of magnitude
+    let magnitude = if bytes > 0 {
+        (bytes as f64).log10().trunc() as u8
+    } else {
+        0
+    };
+
     // General recipe for printing fractional SI information quantities
-    let format_bytes = |power_of_10, unit| {
-        let base = 10_u64.pow(power_of_10);
+    let format_bytes = |unit_magnitude, unit| {
+        let base = 10_u64.pow(unit_magnitude);
         let integral_part = bytes / base;
         let fractional_part = (bytes / (base / 1000)) % 1000;
         format!("{}.{:03} {}", integral_part, fractional_part, unit)
     };
 
-    // Check the order of magnitude and pick the right SI multiple
-    match (bytes as f64).log10().trunc() as u8 {
+    // Select the right recipe depending on the order of magnitude
+    match magnitude {
         0..=2 => format!("{} B", bytes),
         3..=5 => format_bytes(3, "kB"),
         6..=8 => format_bytes(6, "MB"),
