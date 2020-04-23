@@ -8,7 +8,7 @@ use heim::{
     },
 };
 
-use slog::{debug, error, o, warn, Logger};
+use slog::{debug, error, info, o, warn, Logger};
 
 use std::{
     borrow::Cow,
@@ -170,12 +170,12 @@ impl ProcessTree {
                     }
                     Err(err) => print_err(err),
                 };
-                debug!(log, "Found a process";
-                       "pid" => current_pid,
-                       "name" => %process_name,
-                       "executable path" => %process_exe,
-                       "command line" => %process_command,
-                       "creation time" => %process_create_time);
+                info!(log, "Found a process";
+                      "pid" => current_pid,
+                      "name" => %process_name,
+                      "executable path" => %process_exe,
+                      "command line" => %process_command,
+                      "creation time" => %process_create_time);
             }
 
             Err(ProcessInfoError::AccessDenied) => {
