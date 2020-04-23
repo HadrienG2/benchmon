@@ -1,6 +1,6 @@
 use heim::{cpu::CpuFrequency, host::Arch, units::frequency::megahertz};
 
-use slog::{debug, info, o, warn, Logger};
+use slog::{debug, info, warn, Logger};
 
 /// Report on the host's CPU configuration
 pub fn startup_report(
@@ -16,15 +16,17 @@ pub fn startup_report(
           "logical CPU count" => logical_cpus,
           "physical CPU count" => physical_cpus);
 
-    let log_freq_range = |log: &Logger, title: &str, freq: &CpuFrequency| {
+    let log_freq_range = |freq: &CpuFrequency, cpu_name: &str| {
         if let (Some(min), Some(max)) = (freq.min(), freq.max()) {
-            info!(log, "Found {} frequency range", title;
+            info!(log, "Found CPU frequency range";
                   "min frequency (MHz)" => min.get::<megahertz>(),
-                  "max frequency (MHz)" => max.get::<megahertz>());
+                  "max frequency (MHz)" => max.get::<megahertz>(),
+                  "cpu" => cpu_name);
         } else {
-            warn!(log, "Some {} frequency range data is missing", title;
+            warn!(log, "Some CPU frequency range data is missing";
                   "min frequency" => ?freq.min(),
-                  "max frequency" => ?freq.max());
+                  "max frequency" => ?freq.max(),
+                  "cpu" => cpu_name);
         }
     };
 
@@ -43,16 +45,14 @@ pub fn startup_report(
         debug!(log, "Got per-CPU frequency ranges, processing them...");
 
         for (idx, freq) in per_cpu_freqs.into_iter().enumerate() {
-            let cpu_log = log.new(o!("logical cpu index" => idx));
             if printing_detailed_freqs {
-                log_freq_range(&cpu_log, "per-CPU", &freq);
+                log_freq_range(&freq, &idx.to_string());
             } else if (freq.min(), freq.max()) != global_freq_range {
                 printing_detailed_freqs = true;
                 for old_idx in 0..idx {
-                    let old_cpu_log = log.new(o!("logical cpu index" => old_idx));
-                    log_freq_range(&old_cpu_log, "per-CPU", &global_cpu_freq);
+                    log_freq_range(&global_cpu_freq, &old_idx.to_string());
                 }
-                log_freq_range(&cpu_log, "per-CPU", &freq);
+                log_freq_range(&freq, &idx.to_string());
             }
         }
 
@@ -66,6 +66,6 @@ pub fn startup_report(
     }
 
     if !printing_detailed_freqs {
-        log_freq_range(&log, "global CPU", &global_cpu_freq);
+        log_freq_range(&global_cpu_freq, "all");
     }
 }

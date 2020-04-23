@@ -170,7 +170,7 @@ fn report_filesystem(
         };
         let formatted_filesystem = partition.file_system().as_str().to_owned();
 
-        // Group moint points by sorted device name, then capacity, then
+        // Group/sort mount points by sorted device name, then capacity, then
         // filesystem, and finally our hidden used storage disambiguation key.
         let mount_list = dev_to_mounts
             .entry((
