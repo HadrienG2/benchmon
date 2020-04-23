@@ -5,6 +5,7 @@ mod cpu;
 mod filesystem;
 mod memory;
 mod process;
+mod sensors;
 
 use futures_util::{
     future::TryFutureExt,
@@ -15,11 +16,7 @@ use futures_util::{
 use heim::{
     host::{Pid, Platform, User},
     net::{Address, MacAddr, Nic},
-    sensors::TemperatureSensor,
-    units::{
-        information::byte, thermodynamic_temperature::degree_celsius, Information,
-        ThermodynamicTemperature as Temperature,
-    },
+    units::{information::byte, Information},
     virt::Virtualization,
 };
 
@@ -108,9 +105,9 @@ async fn main() -> heim::Result<()> {
     let network_interfaces = network_interfaces.await?;
     report_network(&log, network_interfaces);
 
-    // Report temperature sensor configuration
+    // Report sensor configuration
     let temperatures = temperatures.await?;
-    report_temp_sensors(&log, temperatures);
+    sensors::startup_report(&log, temperatures);
 
     // Report operating system and use of virtualization
     let virt = virt.await;
@@ -455,39 +452,6 @@ fn report_network(log: &Logger, network_interfaces: Vec<Nic>) {
                   "address" => ?ipv6_address_props.address,
                   "netmask" => ?netmask,
                   "target" => ?ipv6_address_props.target);
-        }
-    }
-}
-
-/// Report on the host's temperature sensors
-fn report_temp_sensors(log: &Logger, temperatures: Vec<TemperatureSensor>) {
-    // TODO: Consider exposing this later on
-    struct SensorProperties {
-        label: Option<String>,
-        high_trip_point: Option<Temperature>,
-        critical_trip_point: Option<Temperature>,
-    }
-    let mut unit_to_sensors = BTreeMap::<String, Vec<_>>::new();
-
-    debug!(log, "Processing temperature sensor list...");
-    for sensor in temperatures {
-        let sensor_list = unit_to_sensors.entry(sensor.unit().to_owned()).or_default();
-        sensor_list.push(SensorProperties {
-            label: sensor.label().map(|label| label.to_owned()),
-            high_trip_point: sensor.high(),
-            critical_trip_point: sensor.critical(),
-        });
-    }
-
-    for (unit, mut sensor_list) in unit_to_sensors {
-        let unit_log = log.new(o!("sensor unit" => unit));
-        sensor_list.sort_by_cached_key(|sensor| sensor.label.clone());
-        for sensor in sensor_list {
-            let to_celsius = |t_opt: Option<Temperature>| t_opt.map(|t| t.get::<degree_celsius>());
-            info!(unit_log, "Found a temperature sensor";
-                  "label" => sensor.label,
-                  "high trip point (°C)" => to_celsius(sensor.high_trip_point),
-                  "critical trip point (°C)" => to_celsius(sensor.critical_trip_point));
         }
     }
 }
