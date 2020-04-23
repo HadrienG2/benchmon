@@ -16,6 +16,7 @@ use std::{
         btree_set::BTreeSet,
         hash_map::{Entry, HashMap},
     },
+    iter::FromIterator,
     path::PathBuf,
     time::{Duration, SystemTime},
 };
@@ -30,12 +31,11 @@ struct ProcessTree {
     nodes: HashMap<Pid, ProcessTreeNode>,
 }
 
-impl<ProcessInfoIter> From<ProcessInfoIter> for ProcessTree
-where
-    ProcessInfoIter: IntoIterator<Item = (Pid, Result<ProcessInfo, ProcessInfoError>)>,
-{
-    /// Build a process tree from per-process info
-    fn from(process_info_iter: ProcessInfoIter) -> Self {
+impl FromIterator<(Pid, Result<ProcessInfo, ProcessInfoError>)> for ProcessTree {
+    fn from_iter<ProcessInfoIter>(process_info_iter: ProcessInfoIter) -> Self
+    where
+        ProcessInfoIter: IntoIterator<Item = (Pid, Result<ProcessInfo, ProcessInfoError>)>,
+    {
         // Setup our input iterator and process tree
         let process_info_iter = process_info_iter.into_iter();
         let mut process_tree = ProcessTree::default();
@@ -376,6 +376,6 @@ pub async fn get_process_info(
 pub fn startup_report(log: &Logger, processes: Vec<(Pid, Result<ProcessInfo, ProcessInfoError>)>) {
     // Build a process tree and log its contents
     debug!(log, "Processing process list...");
-    let process_tree = ProcessTree::from(processes);
+    let process_tree = ProcessTree::from_iter(processes);
     process_tree.log(log);
 }
