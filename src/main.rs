@@ -1,6 +1,3 @@
-// FIXME: I probably need to have a word with the heim dev about this
-#![type_length_limit = "230000"]
-
 mod cpu;
 mod filesystem;
 mod memory;
@@ -64,12 +61,12 @@ async fn main() -> heim::Result<()> {
     // - Sensor info
     //
     // FIXME: This stream is where 80% of the remaining type complexity lies
-    //        (crate type complexity is 230000 before commenting it, 47000
-    //        after), but it cannot be boxed as that causes a weird E0308 "one
+    //        (crate type length goes from ~230000 to ~47000 upon commenting
+    //        it out), but it cannot be boxed as that causes a weird E0308 "one
     //        type is more general than the other" error.
     //
     //        There are multiple reports of similar confusing errors on the
-    //        rustc bugtracker, subscribed to those for now and will try again
+    //        rustc bugtracker, I subscribed to those for now and will try again
     //        after they are fixed.
     //
     let temperatures = heim::sensors::temperatures().try_collect::<Vec<_>>();
