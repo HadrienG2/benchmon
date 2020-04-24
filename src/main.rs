@@ -15,7 +15,7 @@ use futures_util::{
 
 use heim::units::{information::byte, Information};
 
-use slog::{info, o, Drain};
+use slog::{info, o, Drain, Logger};
 
 use std::sync::Mutex;
 
@@ -27,6 +27,26 @@ async fn main() -> heim::Result<()> {
     let drain = Mutex::new(drain).fuse();
     let log = slog::Logger::root(drain, o!("benchmon version" => env!("CARGO_PKG_VERSION")));
 
+    // Produce the initial system report
+    // TODO: Make this optional
+    startup_report(&log).await?;
+
+    // TODO: Start polling useful "dynamic" quantities in a system monitor like
+    //       fashion. Try to mimick dstat's tabular output.
+    // TODO: Once we have a good system monitor, start using it to monitor
+    //       execution of some benchmark. Measure baseline before starting
+    //       benchmark execution. Also monitor child getrusage() during process
+    //       execution, and wall-clock execution time.
+    // TODO: After end of benchmark execution, produce tabular data sets for
+    //       manual inspection to begin with, and later implement direct
+    //       support for fancy plots (with plotters? plotly?)
+    // TODO: Add a way to selectively enable/disable stats.
+
+    Ok(())
+}
+
+/// Describe the host system on application startup
+async fn startup_report(log: &Logger) -> heim::Result<()> {
     // Ask heim to start fetching all the system info we need...
     // (with a bit of future boxing here and there to reduce type complexity)
     info!(log, "Probing host system characteristics...");
@@ -123,19 +143,6 @@ async fn main() -> heim::Result<()> {
     // Report running processes
     let processes = processes.await?;
     process::startup_report(&log, processes);
-
-    // TODO: Extract this system summary to a separate async fn, then start
-    //       polling useful "dynamic" quantities in a system monitor like
-    //       fashion. Try to mimick dstat's tabular output.
-    // TODO: Once we have a good system monitor, start using it to monitor
-    //       execution of some benchmark. Measure baseline before starting
-    //       benchmark execution. Also monitor child getrusage() during process
-    //       execution, and wall-clock execution time.
-    // TODO: After end of benchmark execution, produce tabular data sets for
-    //       manual inspection to begin with, and later implement direct
-    //       support for fancy plots (with plotters? plotly?)
-    // TODO: Add a way to selectively enable/disable stats.
-
     Ok(())
 }
 

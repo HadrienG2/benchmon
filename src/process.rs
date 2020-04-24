@@ -237,7 +237,7 @@ pub struct ProcessInfo {
     command: Result<Command, ProcessInfoFieldError>,
 
     /// Time at which the process was created, since Unix epoch
-    // TODO: Convert to something like SystemTime instead
+    // FIXME: Ask heim to use SystemTime instead
     create_time: Result<Time, ProcessInfoFieldError>,
 }
 
