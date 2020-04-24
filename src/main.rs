@@ -1,5 +1,5 @@
 // FIXME: I probably need to have a word with the heim dev about this
-#![type_length_limit = "20000000"]
+#![type_length_limit = "230000"]
 
 mod cpu;
 mod filesystem;
@@ -11,7 +11,7 @@ mod sensors;
 mod users;
 
 use futures_util::{
-    future::TryFutureExt,
+    future::{FutureExt, TryFutureExt},
     stream::{StreamExt, TryStreamExt},
     try_join,
 };
@@ -33,15 +33,18 @@ async fn main() -> heim::Result<()> {
     // Ask heim to start fetching all the system info we need...
     info!(log, "Probing host system characteristics...");
     // - CPU info
-    let global_cpu_freq = heim::cpu::frequency();
+    let global_cpu_freq = heim::cpu::frequency().boxed();
     #[cfg(target_os = "linux")]
     let per_cpu_freqs = heim::cpu::os::linux::frequencies()
         .try_collect::<Vec<_>>()
-        .map_ok(Some);
+        .map_ok(Some)
+        .boxed();
     #[cfg(not(target_os = "linux"))]
     let per_cpu_freqs = futures_util::future::ok(None);
     let logical_cpus = heim::cpu::logical_count();
     let physical_cpus = heim::cpu::physical_count();
+    // - Platform info (= OS info + CPU architecture)
+    let platform = heim::host::platform();
     // - Memory info
     let memory = heim::memory::memory();
     let swap = heim::memory::swap();
@@ -59,12 +62,10 @@ async fn main() -> heim::Result<()> {
     let network_interfaces = heim::net::nic().try_collect::<Vec<_>>();
     // - Sensor info
     let temperatures = heim::sensors::temperatures().try_collect::<Vec<_>>();
-    // - Platform info (= OS info + CPU architecture)
-    let platform = heim::host::platform();
+    // - Virtualization info (boxed to reduce type complexity)
+    let virt = heim::virt::detect().boxed();
     // - User connexion info
     let user_connections = heim::host::users().try_collect::<Vec<_>>();
-    // - Virtualization info
-    let virt = heim::virt::detect();
     // - Initial processes info
     let processes = heim::process::processes()
         .then(process::get_process_info)
