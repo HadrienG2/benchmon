@@ -318,7 +318,8 @@ pub fn startup_report(log: &Logger, network_interfaces: Vec<Nic>) {
 
         // General mechanism to print out IP-layer targets (bcast/dest)
         fn print_ip_target<Addr>(target: Option<Addr>) -> Cow<'static, str>
-            where Addr: Debug
+        where
+            Addr: Debug,
         {
             match target {
                 Some(addr) => format!("{:?}", addr).into(),
