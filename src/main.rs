@@ -31,6 +31,7 @@ async fn main() -> heim::Result<()> {
     let log = slog::Logger::root(drain, o!("benchmon version" => env!("CARGO_PKG_VERSION")));
 
     // Ask heim to start fetching all the system info we need...
+    // (with a bit of future boxing here and there to reduce type complexity)
     info!(log, "Probing host system characteristics...");
     // - CPU info
     let global_cpu_freq = heim::cpu::frequency().boxed();
@@ -61,8 +62,18 @@ async fn main() -> heim::Result<()> {
     // - Network info
     let network_interfaces = heim::net::nic().try_collect::<Vec<_>>();
     // - Sensor info
+    //
+    // FIXME: This stream is where 80% of the remaining type complexity lies
+    //        (crate type complexity is 230000 before commenting it, 47000
+    //        after), but it cannot be boxed as that causes a weird E0308 "one
+    //        type is more general than the other" error.
+    //
+    //        There are multiple reports of similar confusing errors on the
+    //        rustc bugtracker, subscribed to those for now and will try again
+    //        after they are fixed.
+    //
     let temperatures = heim::sensors::temperatures().try_collect::<Vec<_>>();
-    // - Virtualization info (boxed to reduce type complexity)
+    // - Virtualization info
     let virt = heim::virt::detect().boxed();
     // - User connexion info
     let user_connections = heim::host::users().try_collect::<Vec<_>>();
