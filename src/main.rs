@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use structopt::StructOpt;
 
-// Command-line arguments
+// Command-line options
 #[derive(Debug, StructOpt)]
 #[structopt(rename_all = "kebab-case")]
 /// A benchmarking-oriented system monitor
@@ -96,10 +96,10 @@ async fn startup_report(log: &Logger) -> heim::Result<()> {
     let network_interfaces = heim::net::nic().try_collect::<Vec<_>>();
     // - Sensor info
     //
-    // FIXME: This stream is where 80% of the remaining type complexity lies
-    //        (crate type length goes from ~230000 to ~47000 upon commenting
-    //        it out), but it cannot be boxed as that causes a weird E0308 "one
-    //        type is more general than the other" error.
+    // FIXME: This stream is where 80% of the type complexity lies (crate max
+    //        type length goes from ~230000 to ~47000 upon commenting sensor
+    //        reporting out), but I cannot box it because that causes a weird
+    //        E0308 "one type is more general than the other" error.
     //
     //        There are multiple reports of similar confusing errors on the
     //        rustc bugtracker, I subscribed to those for now and will try again
