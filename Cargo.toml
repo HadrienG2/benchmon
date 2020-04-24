@@ -3,6 +3,7 @@ name = "benchmon"
 version = "0.1.0"
 authors = ["Hadrien G. <knights_of_ni@gmx.com>"]
 edition = "2018"
+description = "A benchmarking-oriented system monitor"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -21,3 +22,4 @@ heim = { version = "0.1.0-alpha", features = [ "cpu",
                                                "virt" ] }
 slog = "2.5"
 slog-term = "2.5"
+structopt = "0.3"

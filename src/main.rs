@@ -19,8 +19,23 @@ use slog::{info, o, Drain, Logger};
 
 use std::sync::Mutex;
 
+use structopt::StructOpt;
+
+// Command-line arguments
+#[derive(Debug, StructOpt)]
+#[structopt(rename_all = "kebab-case")]
+/// A benchmarking-oriented system monitor
+struct CliOpts {
+    /// Report the host system's characteristics on startup
+    #[structopt(long)]
+    startup_report: bool,
+}
+
 #[async_std::main]
 async fn main() -> heim::Result<()> {
+    // Parse the command-line options
+    let cli_opts = CliOpts::from_args();
+
     // Set up a logger
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::CompactFormat::new(decorator).build();
@@ -28,8 +43,9 @@ async fn main() -> heim::Result<()> {
     let log = slog::Logger::root(drain, o!("benchmon version" => env!("CARGO_PKG_VERSION")));
 
     // Produce the initial system report
-    // TODO: Make this optional
-    startup_report(&log).await?;
+    if cli_opts.startup_report {
+        startup_report(&log).await?;
+    }
 
     // TODO: Start polling useful "dynamic" quantities in a system monitor like
     //       fashion. Try to mimick dstat's tabular output.
