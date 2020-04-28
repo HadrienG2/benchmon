@@ -70,9 +70,11 @@ async fn main() -> heim::Result<()> {
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
         println!(
-            "{:width$}|",
-            clock_formatter.format(local_time),
-            width = clock_formatter.max_output_width()
+            "{clock:clock_width$}|",
+            // TODO: Use something like chrono's DelayFormat trick to only have
+            //       one "padded display" type to pass in.
+            clock = clock_formatter.format(local_time),
+            clock_width = clock_formatter.max_output_width()
         );
         // TODO: Make this configurable
         thread::sleep(Duration::new(1, 0));
