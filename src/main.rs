@@ -1,3 +1,4 @@
+mod clock;
 mod cpu;
 mod filesystem;
 mod memory;
@@ -6,6 +7,8 @@ mod os;
 mod process;
 mod sensors;
 mod users;
+
+use chrono::Local as LocalTime;
 
 use futures_util::{
     future::{FutureExt, TryFutureExt},
@@ -17,7 +20,11 @@ use heim::units::{information::byte, Information};
 
 use slog::{info, o, Drain, Logger};
 
-use std::sync::Mutex;
+use std::{
+    sync::Mutex,
+    thread,
+    time::Duration,
+};
 
 use structopt::StructOpt;
 
@@ -42,23 +49,37 @@ async fn main() -> heim::Result<()> {
     let drain = Mutex::new(drain).fuse();
     let log = slog::Logger::root(drain, o!("benchmon version" => env!("CARGO_PKG_VERSION")));
 
-    // Produce the initial system report
+    // Produce the initial system report, if asked to
     if cli_opts.startup_report {
         startup_report(&log).await?;
     }
 
-    // TODO: Start polling useful "dynamic" quantities in a system monitor like
-    //       fashion. Try to mimick dstat's tabular output.
+    // Do dynamic system monitoring
+    // TODO: Make this configurable
+    // TODO: Different defaults for stdout records and file records
+    const WALL_CLOCK_FORMAT: &str = "%H:%M:%S";
+    let wall_clock_format = clock::ClockFormat::new(WALL_CLOCK_FORMAT);
+
     // TODO: Once we have a good system monitor, start using it to monitor
     //       execution of some benchmark. Measure baseline before starting
     //       benchmark execution. Also monitor child getrusage() during process
     //       execution, and wall-clock execution time.
+    loop {
+        // TODO: Make whether we record this configurable
+        // TODO: Monitor other quantities, in a configurable set
+        let local_time = LocalTime::now();
+        // TODO: Print multiple quantities in a tabular fashion
+        // TODO: In addition to stdout, support in-memory records, dump to file
+        println!("{:width$}|",
+                 wall_clock_format.format(local_time),
+                 width = wall_clock_format.max_output_width());
+        // TODO: Make this configurable
+        thread::sleep(Duration::new(1, 0));
+    }
+
     // TODO: After end of benchmark execution, produce tabular data sets for
     //       manual inspection to begin with, and later implement direct
     //       support for fancy plots (with plotters? plotly?)
-    // TODO: Add a way to selectively enable/disable stats.
-
-    Ok(())
 }
 
 /// Describe the host system on application startup
