@@ -1,4 +1,4 @@
-use chrono::{format, Datelike, DateTime, TimeZone};
+use chrono::{format, DateTime, Datelike, TimeZone};
 
 use std::fmt::Display;
 
@@ -17,7 +17,7 @@ use unicode_segmentation::UnicodeSegmentation;
 ///
 const MAX_SUPPORTED_YEAR: i32 = 9999;
 
-/// Efficient strftime-style clock formatting for columnar system monitoring
+/// Efficient strftime-style clock formatting for tabular system monitoring
 pub struct ClockFormat {
     /// Decoded version of the format string
     owned_items: Box<[format::Item<'static>]>,
@@ -53,7 +53,7 @@ impl ClockFormat {
                     Item::OwnedSpace(o) => Item::OwnedSpace(o),
                     Item::Numeric(n, p) => Item::Numeric(n, p),
                     Item::Fixed(f) => Item::Fixed(f),
-                    Item::Error => Item::Error
+                    Item::Error => Item::Error,
                 }
             })
             .collect::<Box<[_]>>();
@@ -61,10 +61,7 @@ impl ClockFormat {
         // Compute the maximal width of formatted time produced using this
         // format string (in grapheme clusters), panic if there is no maximum or
         // the format string did not parse.
-        let max_output_width = owned_items
-            .iter()
-            .map(max_item_width)
-            .sum();
+        let max_output_width = owned_items.iter().map(max_item_width).sum();
 
         // Return the result
         Self {
@@ -75,10 +72,12 @@ impl ClockFormat {
 
     /// Format some chrono time as we were configured to
     pub fn format<Tz>(
-        &self, date_time: DateTime<Tz>
-    ) -> format::DelayedFormat<impl Iterator<Item=&format::Item<'static>> + Clone>
-        where Tz: TimeZone,
-              Tz::Offset: Display,
+        &self,
+        date_time: DateTime<Tz>,
+    ) -> format::DelayedFormat<impl Iterator<Item = &format::Item<'static>> + Clone>
+    where
+        Tz: TimeZone,
+        Tz::Offset: Display,
     {
         assert!(date_time.year() < MAX_SUPPORTED_YEAR);
         date_time.format_with_items(self.owned_items.iter())
@@ -98,12 +97,8 @@ impl ClockFormat {
 /// tabular output, panic with a clear error message.
 ///
 fn max_item_width(item: &format::Item) -> usize {
-    let str_width = |what: &str| -> usize {
-        what.graphemes(true).count()
-    };
-    let literal_width = |literal: &str| -> usize {
-        str_width(literal)
-    };
+    let str_width = |what: &str| what.graphemes(true).count();
+    let literal_width = |literal: &str| str_width(literal);
     let space_width = |space: &str| -> usize {
         for ch in space.chars() {
             if let 10 | 11 | 12 | 13 | 133 | 8232 | 8233 = ch as u32 {
@@ -126,15 +121,13 @@ fn max_item_width(item: &format::Item) -> usize {
             let max_supported_year_digits = digits(MAX_SUPPORTED_YEAR as u64);
 
             match numeric {
-                Numeric::Year
-                | Numeric::IsoYear => {
+                Numeric::Year | Numeric::IsoYear => {
                     // Per RFC 8601, year 10k+ will need an explicit sign
                     let sign_length = (MAX_SUPPORTED_YEAR > 10_000) as usize;
                     max_supported_year_digits + sign_length
                 }
 
-                Numeric::YearDiv100
-                | Numeric::IsoYearDiv100 => max_supported_year_digits - 2,
+                Numeric::YearDiv100 | Numeric::IsoYearDiv100 => max_supported_year_digits - 2,
 
                 Numeric::YearMod100
                 | Numeric::IsoYearMod100
@@ -148,8 +141,7 @@ fn max_item_width(item: &format::Item) -> usize {
                 | Numeric::Minute
                 | Numeric::Second => 2,
 
-                Numeric::NumDaysFromSun
-                | Numeric::WeekdayFromMon => 1,
+                Numeric::NumDaysFromSun | Numeric::WeekdayFromMon => 1,
 
                 // Day of year
                 Numeric::Ordinal => 3,
@@ -163,18 +155,13 @@ fn max_item_width(item: &format::Item) -> usize {
                 }
 
                 // Internal chrono stuff, shouldn't pop up in normal formatting
-                Numeric::Internal(_internal) => unreachable!()
+                Numeric::Internal(_internal) => unreachable!(),
             }
         }
 
         Item::Fixed(fixed) => {
-            let max_str_width = |strs: &[&str]| -> usize {
-                strs.iter()
-                    .cloned()
-                    .map(str_width)
-                    .max()
-                    .unwrap()
-            };
+            let max_str_width =
+                |strs: &[&str]| -> usize { strs.iter().cloned().map(str_width).max().unwrap() };
             let max_format_width = |format: &str| {
                 format::StrftimeItems::new(format)
                     .map(|item| max_item_width(&item))
@@ -182,17 +169,26 @@ fn max_item_width(item: &format::Item) -> usize {
             };
 
             match fixed {
-                Fixed::ShortMonthName
-                | Fixed::ShortWeekdayName => 3,
+                Fixed::ShortMonthName | Fixed::ShortWeekdayName => 3,
 
                 Fixed::LongMonthName => {
                     // NOTE: chrono is English-only for now, we may need to stop
                     //       supporting this format if chrono ever starts
                     //       supporting month name localization.
-                    const MONTH_NAMES: [&'static str; 12] = 
-                        ["January", "February", "March", "April", "May",
-                         "June", "July", "August", "September", "October",
-                         "November", "December"];
+                    const MONTH_NAMES: [&'static str; 12] = [
+                        "January",
+                        "February",
+                        "March",
+                        "April",
+                        "May",
+                        "June",
+                        "July",
+                        "August",
+                        "September",
+                        "October",
+                        "November",
+                        "December",
+                    ];
                     max_str_width(&MONTH_NAMES[..])
                 }
 
@@ -200,30 +196,33 @@ fn max_item_width(item: &format::Item) -> usize {
                     // NOTE: chrono is English-only for now, we may need to stop
                     //       supporting this format if chrono ever starts
                     //       supporting day name localization.
-                    const WEEKDAY_NAMES: [&'static str; 7] =
-                        ["Monday", "Tuesday", "Wednesday", "Thursday",
-                         "Friday", "Saturday", "Sunday"];
+                    const WEEKDAY_NAMES: [&'static str; 7] = [
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                        "Saturday",
+                        "Sunday",
+                    ];
                     max_str_width(&WEEKDAY_NAMES[..])
                 }
 
-                Fixed::LowerAmPm
-                | Fixed::UpperAmPm => 2,
+                Fixed::LowerAmPm | Fixed::UpperAmPm => 2,
 
                 Fixed::Nanosecond => 10,
                 Fixed::Nanosecond3 => 4,
                 Fixed::Nanosecond6 => 7,
                 Fixed::Nanosecond9 => 10,
 
-                Fixed::TimezoneName => {
-                    panic!("Timezone names are not supported as tabular output
-                            because their length is unbounded")
-                }
+                Fixed::TimezoneName => panic!(
+                    "Timezone names are not supported as tabular output
+                            because their length is unbounded"
+                ),
 
-                Fixed::TimezoneOffsetColon
-                | Fixed::TimezoneOffsetColonZ => 6,
+                Fixed::TimezoneOffsetColon | Fixed::TimezoneOffsetColonZ => 6,
 
-                Fixed::TimezoneOffset
-                | Fixed::TimezoneOffsetZ => 5,
+                Fixed::TimezoneOffset | Fixed::TimezoneOffsetZ => 5,
 
                 Fixed::RFC2822 => {
                     const RFC2822: &'static str = "%a, %e %b %Y %H:%M:%S %z";
@@ -236,7 +235,7 @@ fn max_item_width(item: &format::Item) -> usize {
                 }
 
                 // Internal chrono stuff, shouldn't pop up in normal formatting
-                Fixed::Internal(_internal) => unreachable!()
+                Fixed::Internal(_internal) => unreachable!(),
             }
         }
 

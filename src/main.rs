@@ -20,11 +20,7 @@ use heim::units::{information::byte, Information};
 
 use slog::{info, o, Drain, Logger};
 
-use std::{
-    sync::Mutex,
-    thread,
-    time::Duration,
-};
+use std::{sync::Mutex, thread, time::Duration};
 
 use structopt::StructOpt;
 
@@ -70,9 +66,11 @@ async fn main() -> heim::Result<()> {
         let local_time = LocalTime::now();
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
-        println!("{:width$}|",
-                 wall_clock_format.format(local_time),
-                 width = wall_clock_format.max_output_width());
+        println!(
+            "{:width$}|",
+            wall_clock_format.format(local_time),
+            width = wall_clock_format.max_output_width()
+        );
         // TODO: Make this configurable
         thread::sleep(Duration::new(1, 0));
     }
