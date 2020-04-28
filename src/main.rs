@@ -20,7 +20,12 @@ use heim::units::{information::byte, Information};
 
 use slog::{info, o, Drain, Logger};
 
-use std::{sync::Mutex, thread, time::Duration};
+use std::{
+    fmt::{self, Display},
+    sync::Mutex,
+    thread,
+    time::Duration,
+};
 
 use structopt::StructOpt;
 
@@ -33,9 +38,9 @@ struct CliOpts {
     #[structopt(long)]
     startup_report: bool,
 
-    /// Desired system clock format, in strftime notation
-    #[structopt(long, default_value="%H:%M:%S")]
-    clock_format: String,
+    /// Desired date/time format, in strftime notation
+    #[structopt(long, default_value = "%H:%M:%S")]
+    time_format: String,
 }
 
 #[async_std::main]
@@ -57,25 +62,27 @@ async fn main() -> heim::Result<()> {
     // Do dynamic system monitoring
     // TODO: Should use different format for stdout records and file records,
     //       once file output is supported.
-    let clock_formatter = clock::ClockFormatter::new(&cli_opts.clock_format);
+    let clock_formatter = clock::Formatter::new(&cli_opts.time_format);
 
     // TODO: Once we have a good system monitor, also allow using it to monitor
     //       execution of some benchmark. Measure baseline before starting
     //       benchmark execution. Also monitor child getrusage() during process
     //       execution, and wall-clock execution time.
+    //
+    // TODO: Repeat headers every screenful of data like dstat does
+    // TODO: Merge title functionality into ClockFormatter, call it format_title
+    // TODO: If ClockFormatter output width is shorter than title, increase output width
+    const CLOCK_TITLE: &str = "time";
+    println!("{title:-^title_width$}|",
+             title = CLOCK_TITLE,
+             title_width = clock_formatter.output_width());
     loop {
         // TODO: Monitor other quantities
         // TODO: Make the set of monitored quantities configurable
         let local_time = LocalTime::now();
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
-        println!(
-            "{clock:clock_width$}|",
-            // TODO: Use something like chrono's DelayFormat trick to only have
-            //       one "padded display" type to pass in.
-            clock = clock_formatter.format(local_time),
-            clock_width = clock_formatter.max_output_width()
-        );
+        println!("{}|", clock_formatter.format(local_time));
         // TODO: Make this configurable
         thread::sleep(Duration::new(1, 0));
     }
@@ -213,5 +220,35 @@ fn format_information(quantity: Information) -> String {
         6..=8 => format_bytes(6, "MB"),
         9..=11 => format_bytes(9, "GB"),
         _ => format_bytes(12, "TB"),
+    }
+}
+
+/// Wrapper around a Display impl which enforces a fixed output width
+struct FixedDisplay<InnerDisplay: Display> {
+    /// Inner Display implementation
+    inner: InnerDisplay,
+
+    /// Desired output width (should be an upper bound of inner's output width)
+    max_output_width: usize,
+}
+
+impl<InnerDisplay: Display> FixedDisplay<InnerDisplay> {
+    /// Build a fixed-width display
+    pub fn new(inner: InnerDisplay, max_output_width: usize) -> Self {
+        Self {
+            inner,
+            max_output_width,
+        }
+    }
+}
+
+impl<InnerDisplay: Display> Display for FixedDisplay<InnerDisplay> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{inner:width$}",
+            inner = &self.inner,
+            width = self.max_output_width
+        )
     }
 }

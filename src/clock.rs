@@ -1,5 +1,7 @@
 use chrono::{format, DateTime, Datelike, TimeZone};
 
+use crate::FixedDisplay;
+
 use std::fmt::Display;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -18,7 +20,7 @@ use unicode_segmentation::UnicodeSegmentation;
 const MAX_SUPPORTED_YEAR: i32 = 9999;
 
 /// Efficient strftime-style clock formatting for tabular system monitoring
-pub struct ClockFormatter {
+pub struct Formatter {
     /// Decoded version of the format string
     owned_items: Box<[format::Item<'static>]>,
 
@@ -26,7 +28,7 @@ pub struct ClockFormatter {
     max_output_width: usize,
 }
 
-impl ClockFormatter {
+impl Formatter {
     /// Construct a time formatter from a format string following `chrono`'s
     /// flavor of strftime date/time format syntax.
     ///
@@ -71,20 +73,20 @@ impl ClockFormatter {
     }
 
     /// Format some chrono time as we were configured to
-    pub fn format<Tz>(
-        &self,
-        date_time: DateTime<Tz>,
-    ) -> format::DelayedFormat<impl Iterator<Item = &format::Item<'static>> + Clone>
+    pub fn format<Tz>(&self, date_time: DateTime<Tz>) -> impl Display + '_
     where
         Tz: TimeZone,
         Tz::Offset: Display,
     {
         assert!(date_time.year() < MAX_SUPPORTED_YEAR);
-        date_time.format_with_items(self.owned_items.iter())
+        FixedDisplay::new(
+            date_time.format_with_items(self.owned_items.iter()),
+            self.max_output_width,
+        )
     }
 
-    /// Indicate the maximum width of the formatted output in grapheme clusters
-    pub fn max_output_width(&self) -> usize {
+    /// Indicate the width of the formatted output in grapheme clusters
+    pub fn output_width(&self) -> usize {
         self.max_output_width
     }
 }
