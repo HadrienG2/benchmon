@@ -74,7 +74,7 @@ async fn main() -> heim::Result<()> {
     // TODO: If ClockFormatter output width is shorter than title, increase output width
     const CLOCK_TITLE: &str = "time";
     print_col_header(CLOCK_TITLE, clock_formatter.output_width());
-    println!();
+    println!("|");
     loop {
         // TODO: Monitor other quantities
         // TODO: Make the set of monitored quantities configurable
@@ -254,5 +254,5 @@ impl<InnerDisplay: Display> Display for FixedDisplay<InnerDisplay> {
 
 /// Display the header of a column of measurements
 fn print_col_header(name: &str, width: usize) {
-    print!("{0:-^1$}|", name, width)
+    print!("{0:-^1$}", name, width)
 }
