@@ -32,6 +32,10 @@ struct CliOpts {
     /// Report the host system's characteristics on startup
     #[structopt(long)]
     startup_report: bool,
+
+    /// Desired system time format
+    #[structopt(long, default_value="%H:%M:%S")]
+    clock_format: String,
 }
 
 #[async_std::main]
@@ -51,10 +55,8 @@ async fn main() -> heim::Result<()> {
     }
 
     // Do dynamic system monitoring
-    // TODO: Make this configurable
     // TODO: Different defaults for stdout records and file records
-    const WALL_CLOCK_FORMAT: &str = "%H:%M:%S";
-    let wall_clock_format = clock::ClockFormat::new(WALL_CLOCK_FORMAT);
+    let clock_format = clock::ClockFormat::new(&cli_opts.clock_format);
 
     // TODO: Once we have a good system monitor, start using it to monitor
     //       execution of some benchmark. Measure baseline before starting
@@ -68,8 +70,8 @@ async fn main() -> heim::Result<()> {
         // TODO: In addition to stdout, support in-memory records, dump to file
         println!(
             "{:width$}|",
-            wall_clock_format.format(local_time),
-            width = wall_clock_format.max_output_width()
+            clock_format.format(local_time),
+            width = clock_format.max_output_width()
         );
         // TODO: Make this configurable
         thread::sleep(Duration::new(1, 0));
