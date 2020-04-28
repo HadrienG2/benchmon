@@ -6,7 +6,7 @@ use std::fmt::Display;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-/// May year that we allow ourselves to support in date formatting
+/// Maximum year that we allow ourselves to support in date formatting
 ///
 /// The code of this module can technically support any Gregorian year that
 /// `chrono::DateTime` can handle. However, doing so would make us unnecessarily
@@ -15,7 +15,7 @@ use unicode_segmentation::UnicodeSegmentation;
 /// couple thousand years and 4-digit years are enough.
 ///
 /// If you are from the far future and this assumption turned out to be
-/// incorrect, please adjust this constant.
+/// incorrect, please adjust the following constant.
 ///
 const MAX_SUPPORTED_YEAR: i32 = 9999;
 
@@ -78,7 +78,7 @@ impl Formatter {
         Tz: TimeZone,
         Tz::Offset: Display,
     {
-        assert!(date_time.year() < MAX_SUPPORTED_YEAR);
+        assert!(date_time.year() <= MAX_SUPPORTED_YEAR);
         FixedDisplay::new(
             date_time.format_with_items(self.owned_items.iter()),
             self.max_output_width,
@@ -100,11 +100,10 @@ impl Formatter {
 ///
 fn max_item_width(item: &format::Item) -> usize {
     let str_width = |what: &str| what.graphemes(true).count();
-    let literal_width = |literal: &str| str_width(literal);
     let space_width = |space: &str| -> usize {
         for ch in space.chars() {
             if let 10 | 11 | 12 | 13 | 133 | 8232 | 8233 = ch as u32 {
-                panic!("Line breaks are unfit for tabular output");
+                panic!("Line breaks are not acceptable in tabular output");
             }
         }
         str_width(space)
@@ -112,8 +111,8 @@ fn max_item_width(item: &format::Item) -> usize {
 
     use format::{Fixed, Item, Numeric};
     match item {
-        Item::Literal(l) => literal_width(l),
-        Item::OwnedLiteral(ol) => literal_width(&ol),
+        Item::Literal(l) => str_width(l),
+        Item::OwnedLiteral(ol) => str_width(&ol),
 
         Item::Space(s) => space_width(s),
         Item::OwnedSpace(os) => space_width(&os),
@@ -218,8 +217,8 @@ fn max_item_width(item: &format::Item) -> usize {
                 Fixed::Nanosecond9 => 10,
 
                 Fixed::TimezoneName => panic!(
-                    "Timezone names are not supported as tabular output
-                            because their length is unbounded"
+                    "Timezone names are not supported as tabular output \
+                     because their length is unbounded"
                 ),
 
                 Fixed::TimezoneOffsetColon | Fixed::TimezoneOffsetColonZ => 6,
