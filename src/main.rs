@@ -33,7 +33,7 @@ struct CliOpts {
     #[structopt(long)]
     startup_report: bool,
 
-    /// Desired system time format
+    /// Desired system clock format, in strftime notation
     #[structopt(long, default_value="%H:%M:%S")]
     clock_format: String,
 }
@@ -55,23 +55,24 @@ async fn main() -> heim::Result<()> {
     }
 
     // Do dynamic system monitoring
-    // TODO: Different defaults for stdout records and file records
-    let clock_format = clock::ClockFormat::new(&cli_opts.clock_format);
+    // TODO: Should use different format for stdout records and file records,
+    //       once file output is supported.
+    let clock_formatter = clock::ClockFormatter::new(&cli_opts.clock_format);
 
-    // TODO: Once we have a good system monitor, start using it to monitor
+    // TODO: Once we have a good system monitor, also allow using it to monitor
     //       execution of some benchmark. Measure baseline before starting
     //       benchmark execution. Also monitor child getrusage() during process
     //       execution, and wall-clock execution time.
     loop {
-        // TODO: Make whether we record this configurable
-        // TODO: Monitor other quantities, in a configurable set
+        // TODO: Monitor other quantities
+        // TODO: Make the set of monitored quantities configurable
         let local_time = LocalTime::now();
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
         println!(
             "{:width$}|",
-            clock_format.format(local_time),
-            width = clock_format.max_output_width()
+            clock_formatter.format(local_time),
+            width = clock_formatter.max_output_width()
         );
         // TODO: Make this configurable
         thread::sleep(Duration::new(1, 0));

@@ -18,7 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 const MAX_SUPPORTED_YEAR: i32 = 9999;
 
 /// Efficient strftime-style clock formatting for tabular system monitoring
-pub struct ClockFormat {
+pub struct ClockFormatter {
     /// Decoded version of the format string
     owned_items: Box<[format::Item<'static>]>,
 
@@ -26,7 +26,7 @@ pub struct ClockFormat {
     max_output_width: usize,
 }
 
-impl ClockFormat {
+impl ClockFormatter {
     /// Construct a time formatter from a format string following `chrono`'s
     /// flavor of strftime date/time format syntax.
     ///
