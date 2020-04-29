@@ -1,3 +1,7 @@
+//! Query and display CPU information
+
+pub mod freq;
+
 use heim::{cpu::CpuFrequency, host::Arch, units::frequency::megahertz};
 
 use slog::{debug, info, warn, Logger};
