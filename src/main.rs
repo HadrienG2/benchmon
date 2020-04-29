@@ -1,4 +1,3 @@
-mod clock;
 mod cpu;
 mod filesystem;
 mod format;
@@ -7,6 +6,7 @@ mod network;
 mod os;
 mod process;
 mod sensors;
+mod time;
 mod users;
 
 use chrono::Local as LocalTime;
@@ -33,7 +33,7 @@ struct CliOpts {
     startup_report: bool,
 
     /// Desired date/time format, in strftime notation
-    #[structopt(long, default_value = "%H:%M:%S")]
+    #[structopt(long, default_value = "%a %H:%M:%S")]
     time_format: String,
 }
 
@@ -53,11 +53,11 @@ async fn main() -> heim::Result<()> {
         startup_report(&log).await?;
     }
 
-    // Prepare to print periodical clock measurements
+    // Prepare to print periodical time measurements
     //
     // TODO: Should use different format for stdout records and file records,
     //       once dedicated CSV file output is supported.
-    let clock_formatter = clock::Formatter::new(&cli_opts.time_format);
+    let time_formatter = time::Formatter::new(&cli_opts.time_format);
 
     // Perform general system monitoring
     //
@@ -75,11 +75,11 @@ async fn main() -> heim::Result<()> {
             .map(|(_width, height)| height as u64)
             .unwrap_or(u64::MAX);
         if newlines_since_last_header >= term_height - HEADER_HEIGHT {
-            println!("{}|", clock_formatter.display_title());
+            println!("{}|", time_formatter.display_title());
             newlines_since_last_header = 1;
         }
 
-        // Measure the time
+        // Monitor the time
         // TODO: Monitor other quantities
         // TODO: Make the set of monitored quantities configurable
         let local_time = LocalTime::now();
@@ -87,7 +87,7 @@ async fn main() -> heim::Result<()> {
         // Display the measurements
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
-        println!("{}|", clock_formatter.display_data(local_time));
+        println!("{}|", time_formatter.display_data(local_time));
         newlines_since_last_header += 1;
 
         // Wait for a while

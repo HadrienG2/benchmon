@@ -20,7 +20,7 @@ use std::fmt::Display;
 ///
 const MAX_SUPPORTED_YEAR: i32 = 9999;
 
-/// Efficient strftime-style clock formatting for tabular system monitoring
+/// Efficient strftime-style time formatting for tabular system monitoring
 pub struct Formatter {
     /// Decoded version of the format string
     owned_items: Box<[Item<'static>]>,
