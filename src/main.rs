@@ -154,7 +154,7 @@ async fn startup_report(log: &Logger) -> heim::Result<()> {
     //
     let temperatures = heim::sensors::temperatures().try_collect::<Vec<_>>();
     // - Virtualization info
-    let virt = heim::virt::detect().boxed();
+    let virt = heim::virt::detect().map(Ok).boxed();
     // - User connexion info
     let user_connections = heim::host::users().try_collect::<Vec<_>>();
     // - Initial processes info
@@ -163,16 +163,10 @@ async fn startup_report(log: &Logger) -> heim::Result<()> {
         .try_collect::<Vec<_>>();
 
     // Report CPU configuration
-    let (platform, logical_cpus, physical_cpus, global_cpu_freq, per_cpu_freqs) = try_join!(
-        platform,
-        logical_cpus,
-        physical_cpus,
-        global_cpu_freq,
-        per_cpu_freqs
-    )?;
+    let (logical_cpus, physical_cpus, global_cpu_freq, per_cpu_freqs) =
+        try_join!(logical_cpus, physical_cpus, global_cpu_freq, per_cpu_freqs)?;
     cpu::startup_report(
         &log,
-        platform.architecture(),
         logical_cpus,
         physical_cpus,
         global_cpu_freq,
@@ -196,7 +190,7 @@ async fn startup_report(log: &Logger) -> heim::Result<()> {
     sensors::startup_report(&log, temperatures);
 
     // Report operating system and use of virtualization
-    let virt = virt.await;
+    let (platform, virt) = try_join!(platform, virt)?;
     os::startup_report(&log, platform, virt);
 
     // Report open user sessions
