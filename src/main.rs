@@ -1,6 +1,7 @@
 mod clock;
 mod cpu;
 mod filesystem;
+mod format;
 mod memory;
 mod network;
 mod os;
@@ -16,16 +17,9 @@ use futures_util::{
     try_join,
 };
 
-use heim::units::{information::byte, Information};
-
 use slog::{info, o, Drain, Logger};
 
-use std::{
-    fmt::{self, Display},
-    sync::Mutex,
-    thread,
-    time::Duration,
-};
+use std::{sync::Mutex, thread, time::Duration};
 
 use structopt::StructOpt;
 
@@ -70,18 +64,14 @@ async fn main() -> heim::Result<()> {
     //       execution, and wall-clock execution time.
     //
     // TODO: Repeat headers every screenful of data like dstat does
-    // TODO: Merge title functionality into ClockFormatter, call it format_title
-    // TODO: If ClockFormatter output width is shorter than title, increase output width
-    const CLOCK_TITLE: &str = "time";
-    print_col_header(CLOCK_TITLE, clock_formatter.output_width());
-    println!("|");
+    println!("{}|", clock_formatter.display_title());
     loop {
         // TODO: Monitor other quantities
         // TODO: Make the set of monitored quantities configurable
         let local_time = LocalTime::now();
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
-        println!("{}|", clock_formatter.format(local_time));
+        println!("{}|", clock_formatter.display_data(local_time));
         // TODO: Make this configurable
         thread::sleep(Duration::new(1, 0));
     }
@@ -190,69 +180,4 @@ async fn startup_report(log: &Logger) -> heim::Result<()> {
     let processes = processes.await?;
     process::startup_report(&log, processes);
     Ok(())
-}
-
-/// Pretty-print a quantity of information from heim
-fn format_information(quantity: Information) -> String {
-    // Get the quantity of information in bytes
-    let bytes = quantity.get::<byte>();
-
-    // Check that quantity's order of magnitude
-    let magnitude = if bytes > 0 {
-        (bytes as f64).log10().trunc() as u8
-    } else {
-        0
-    };
-
-    // General recipe for printing fractional SI information quantities
-    let format_bytes = |unit_magnitude, unit| {
-        let base = 10_u64.pow(unit_magnitude);
-        let integral_part = bytes / base;
-        let fractional_part = (bytes / (base / 1000)) % 1000;
-        format!("{}.{:03} {}", integral_part, fractional_part, unit)
-    };
-
-    // Select the right recipe depending on the order of magnitude
-    match magnitude {
-        0..=2 => format!("{} B", bytes),
-        3..=5 => format_bytes(3, "kB"),
-        6..=8 => format_bytes(6, "MB"),
-        9..=11 => format_bytes(9, "GB"),
-        _ => format_bytes(12, "TB"),
-    }
-}
-
-/// Wrapper around a Display impl which enforces a fixed output width
-struct FixedDisplay<InnerDisplay: Display> {
-    /// Inner Display implementation
-    inner: InnerDisplay,
-
-    /// Desired output width (should be an upper bound of inner's output width)
-    max_output_width: usize,
-}
-
-impl<InnerDisplay: Display> FixedDisplay<InnerDisplay> {
-    /// Build a fixed-width display
-    pub fn new(inner: InnerDisplay, max_output_width: usize) -> Self {
-        Self {
-            inner,
-            max_output_width,
-        }
-    }
-}
-
-impl<InnerDisplay: Display> Display for FixedDisplay<InnerDisplay> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{inner:width$}",
-            inner = &self.inner,
-            width = self.max_output_width
-        )
-    }
-}
-
-/// Display the header of a column of measurements
-fn print_col_header(name: &str, width: usize) {
-    print!("{0:-^1$}", name, width)
 }

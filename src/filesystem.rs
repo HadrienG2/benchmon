@@ -1,3 +1,5 @@
+use crate::format;
+
 use heim::{
     disk::{Partition, Usage},
     units::information::byte,
@@ -36,7 +38,7 @@ pub fn startup_report(
             "none".to_owned()
         };
         let formatted_capacity = match capacity {
-            Ok(capacity) => crate::format_information(capacity),
+            Ok(capacity) => format!("{}", format::display_information(capacity)),
             Err(err) => format!("Unavailable ({})", err),
         };
         let formatted_filesystem = partition.file_system().as_str().to_owned();

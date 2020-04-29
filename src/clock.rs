@@ -1,10 +1,11 @@
-use chrono::{format, DateTime, Datelike, TimeZone};
+use chrono::{
+    format::{Item, StrftimeItems},
+    DateTime, Datelike, TimeZone,
+};
 
-use crate::FixedDisplay;
+use crate::format;
 
 use std::fmt::Display;
-
-use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum year that we allow ourselves to support in date formatting
 ///
@@ -22,7 +23,7 @@ const MAX_SUPPORTED_YEAR: i32 = 9999;
 /// Efficient strftime-style clock formatting for tabular system monitoring
 pub struct Formatter {
     /// Decoded version of the format string
-    owned_items: Box<[format::Item<'static>]>,
+    owned_items: Box<[Item<'static>]>,
 
     /// Cached max output width expected from the format string
     max_output_width: usize,
@@ -39,10 +40,9 @@ impl Formatter {
     ///
     pub fn new(s: &str) -> Self {
         // Parse the format string and compute an owned version of the results
-        let owned_items = format::StrftimeItems::new(s)
-            .map(|item: format::Item<'_>| -> format::Item<'static> {
+        let owned_items = StrftimeItems::new(s)
+            .map(|item: Item<'_>| -> Item<'static> {
                 let into_box_str = |s: &str| s.to_owned().into_boxed_str();
-                use format::Item;
                 match item {
                     Item::Literal(l) => Item::OwnedLiteral(into_box_str(l)),
                     Item::Space(s) => Item::OwnedSpace(into_box_str(s)),
@@ -63,7 +63,11 @@ impl Formatter {
         // Compute the maximal width of formatted time produced using this
         // format string (in grapheme clusters), panic if there is no maximum or
         // the format string did not parse.
-        let max_output_width = owned_items.iter().map(max_item_width).sum();
+        let max_output_width = owned_items
+            .iter()
+            .map(max_item_width)
+            .sum::<usize>()
+            .max(format::str_width(Self::TITLE));
 
         // Return the result
         Self {
@@ -72,20 +76,29 @@ impl Formatter {
         }
     }
 
-    /// Format some chrono time as we were configured to
-    pub fn format<Tz>(&self, date_time: DateTime<Tz>) -> impl Display + '_
+    /// Title of the column in tabular output
+    const TITLE: &'static str = "time";
+
+    /// Display the title of a column of results
+    pub fn display_title(&self) -> impl Display {
+        format::display_col_header(Self::TITLE, self.max_output_width)
+    }
+
+    /// Display a time point within a column of results
+    pub fn display_data<Tz>(&self, date_time: DateTime<Tz>) -> impl Display + '_
     where
         Tz: TimeZone,
         Tz::Offset: Display,
     {
         assert!(date_time.year() <= MAX_SUPPORTED_YEAR);
-        FixedDisplay::new(
+        format::display_col_data(
             date_time.format_with_items(self.owned_items.iter()),
             self.max_output_width,
         )
     }
 
-    /// Indicate the width of the formatted output in grapheme clusters
+    /// Indicate the width of the output column in grapheme clusters
+    #[allow(unused)]
     pub fn output_width(&self) -> usize {
         self.max_output_width
     }
@@ -98,21 +111,20 @@ impl Formatter {
 /// If there is no upper bound, or if the input is more generally unsuitable for
 /// tabular output, panic with a clear error message.
 ///
-fn max_item_width(item: &format::Item) -> usize {
-    let str_width = |what: &str| what.graphemes(true).count();
+fn max_item_width(item: &Item) -> usize {
     let space_width = |space: &str| -> usize {
         for ch in space.chars() {
             if let 10 | 11 | 12 | 13 | 133 | 8232 | 8233 = ch as u32 {
                 panic!("Line breaks are not acceptable in tabular output");
             }
         }
-        str_width(space)
+        format::str_width(space)
     };
 
-    use format::{Fixed, Item, Numeric};
+    use chrono::format::{Fixed, Numeric};
     match item {
-        Item::Literal(l) => str_width(l),
-        Item::OwnedLiteral(ol) => str_width(&ol),
+        Item::Literal(l) => format::str_width(l),
+        Item::OwnedLiteral(ol) => format::str_width(&ol),
 
         Item::Space(s) => space_width(s),
         Item::OwnedSpace(os) => space_width(&os),
@@ -161,10 +173,11 @@ fn max_item_width(item: &format::Item) -> usize {
         }
 
         Item::Fixed(fixed) => {
-            let max_str_width =
-                |strs: &[&str]| -> usize { strs.iter().cloned().map(str_width).max().unwrap() };
+            let max_str_width = |strs: &[&str]| -> usize {
+                strs.iter().cloned().map(format::str_width).max().unwrap()
+            };
             let max_format_width = |format: &str| {
-                format::StrftimeItems::new(format)
+                StrftimeItems::new(format)
                     .map(|item| max_item_width(&item))
                     .sum()
             };
