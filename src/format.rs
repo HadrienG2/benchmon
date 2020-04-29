@@ -22,13 +22,17 @@ where
 
 /// Display the header of a column of measurements
 pub fn display_col_header(text: &str, width: usize) -> impl fmt::Display + '_ {
-    DelayedDisplay(move |dest| write!(dest, "{0:-^1$}", text, width))
+    DelayedDisplay(move |dest| write!(dest, "{0:─^1$}", text, width))
 }
+
+pub const COL_HEADER_SEPARATOR: char = '┼';
 
 /// Display a measurement within a column
 pub fn display_col_data(data: impl fmt::Display, width: usize) -> impl fmt::Display {
     DelayedDisplay(move |dest| write!(dest, "{0:1$}", data, width))
 }
+
+pub const COL_DATA_SEPARATOR: char = '│';
 
 /// Display a quantity of information from heim
 pub fn display_information(quantity: Information) -> impl fmt::Display {

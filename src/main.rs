@@ -75,7 +75,11 @@ async fn main() -> heim::Result<()> {
             .map(|(_width, height)| height as u64)
             .unwrap_or(u64::MAX);
         if newlines_since_last_header >= term_height - HEADER_HEIGHT {
-            println!("{}|", time_formatter.display_title());
+            println!(
+                "{}{}",
+                time_formatter.display_title(),
+                format::COL_HEADER_SEPARATOR
+            );
             newlines_since_last_header = 1;
         }
 
@@ -87,7 +91,11 @@ async fn main() -> heim::Result<()> {
         // Display the measurements
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
-        println!("{}|", time_formatter.display_data(local_time));
+        println!(
+            "{}{}",
+            time_formatter.display_data(local_time),
+            format::COL_DATA_SEPARATOR
+        );
         newlines_since_last_header += 1;
 
         // Wait for a while
