@@ -113,6 +113,7 @@ dependencies = [
  "slog",
  "slog-term",
  "structopt",
+ "termize",
  "unicode-segmentation",
 ]
 
@@ -1083,6 +1084,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0863a3345e70f61d613eab32ee046ccd1bcc5f9105fe402c61fcd0c13eeb8b5"
 dependencies = [
  "dirs",
+ "winapi 0.3.8",
+]
+
+[[package]]
+name = "termize"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1706be6b564323ce7092f5f7e6b118a14c8ef7ed0e69c8c5329c914a9f101295"
+dependencies = [
+ "libc",
  "winapi 0.3.8",
 ]
 

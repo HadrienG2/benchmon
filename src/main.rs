@@ -53,26 +53,45 @@ async fn main() -> heim::Result<()> {
         startup_report(&log).await?;
     }
 
-    // Do dynamic system monitoring
+    // Prepare to print periodical clock measurements
+    //
     // TODO: Should use different format for stdout records and file records,
-    //       once file output is supported.
+    //       once dedicated CSV file output is supported.
     let clock_formatter = clock::Formatter::new(&cli_opts.time_format);
 
+    // Perform general system monitoring
+    //
     // TODO: Once we have a good system monitor, also allow using it to monitor
     //       execution of some benchmark. Measure baseline before starting
     //       benchmark execution. Also monitor child getrusage() during process
     //       execution, and wall-clock execution time.
     //
-    // TODO: Repeat headers every screenful of data like dstat does
-    println!("{}|", clock_formatter.display_title());
+    let mut newlines_since_last_header = u64::MAX;
     loop {
+        // Print a header describing the measurements in the beginning, and if
+        // we are outputting to a terminal, re-print it once per page of output.
+        const HEADER_HEIGHT: u64 = 1;
+        let term_height = termize::dimensions_stdout()
+            .map(|(_width, height)| height as u64)
+            .unwrap_or(u64::MAX);
+        if newlines_since_last_header >= term_height - HEADER_HEIGHT {
+            println!("{}|", clock_formatter.display_title());
+            newlines_since_last_header = 1;
+        }
+
+        // Measure the time
         // TODO: Monitor other quantities
         // TODO: Make the set of monitored quantities configurable
         let local_time = LocalTime::now();
+
+        // Display the measurements
         // TODO: Print multiple quantities in a tabular fashion
         // TODO: In addition to stdout, support in-memory records, dump to file
         println!("{}|", clock_formatter.display_data(local_time));
-        // TODO: Make this configurable
+        newlines_since_last_header += 1;
+
+        // Wait for a while
+        // TODO: Make period configurable
         thread::sleep(Duration::new(1, 0));
     }
 
