@@ -189,6 +189,9 @@ impl Monitor {
     /// If you want the CPU statistics since boot, it is better to call
     /// `heim::cpu::stats()` directly.
     ///
+    // FIXME: I bet these async functions that take &mut can't be "running" at
+    //        the same time as that's multiple mutable borrows. May need to
+    //        use ugly RefCell tricks to handle this.
     pub async fn stats_change(&mut self) -> heim::Result<StatsDelta> {
         #[cfg(target_os = "linux")]
         use heim::cpu::os::linux::CpuStatsExt;
